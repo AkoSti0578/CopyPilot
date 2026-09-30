@@ -379,7 +379,8 @@ public class StagedRouteTests
             esac
             echo "Final Job Status: Completed"
             """.Replace("\r\n", "\n"));
-        File.SetUnixFileMode(script, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        if (!OperatingSystem.IsWindows())
+            File.SetUnixFileMode(script, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
         return script;
     }
 

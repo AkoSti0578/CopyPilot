@@ -27,9 +27,17 @@ public enum LogKind
 }
 
 /// <summary>One output line. A class (not a record) so identical lines stay distinct items in the list.</summary>
-public sealed class LogLine(string text, LogKind kind)
+public sealed class LogLine(string text, LogKind kind) : ObservableObject
 {
-    public string Text { get; } = text;
+    private string _text = text;
+
+    /// <summary>Mutable so the progress line can be updated in place (no Replace events on the list).</summary>
+    public string Text
+    {
+        get => _text;
+        set => Set(ref _text, value);
+    }
+
     public LogKind Kind { get; } = kind;
 }
 
@@ -472,7 +480,7 @@ public sealed class MainViewModel : ObservableObject
 
             // Keep a single, updating progress line instead of hundreds of them.
             if (kind == LogKind.Progress && Log.Count > 0 && Log[^1].Kind == LogKind.Progress)
-                Log[^1] = new LogLine(o.Text, kind);
+                Log[^1].Text = o.Text;
             else
                 AddLog(new LogLine(o.Text, kind));
         }
@@ -480,8 +488,15 @@ public sealed class MainViewModel : ObservableObject
 
     private void AddLog(LogLine line)
     {
+        // Trim in blocks so the list is not shifted on every new line once it is full.
+        if (Log.Count >= MaxLogLines)
+        {
+            var keep = Log.Skip(MaxLogLines / 10).ToList();
+            Log.Clear();
+            foreach (var l in keep) Log.Add(l);
+        }
+
         Log.Add(line);
-        while (Log.Count > MaxLogLines) Log.RemoveAt(0);
     }
 
     private void Cancel()
