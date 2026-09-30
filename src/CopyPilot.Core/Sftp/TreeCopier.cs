@@ -49,6 +49,31 @@ public sealed class TreeCopyResult
         : Done == 0 ? "Failed" : "CompletedWithErrors";
 }
 
+/// <summary>A file selected for transfer, with its path relative to the destination root ('/'-separated).</summary>
+public sealed record SelectedFile(FileEntry Entry, string RelativePath);
+
+/// <summary>The files and folders a source path (file, folder or wildcard) selects.</summary>
+public sealed class SourceSelection
+{
+    public required string Name { get; init; }
+    public bool IsSingleFile { get; init; }
+    public bool IsWildcard { get; init; }
+
+    /// <summary>Relative folder that holds the selection at the destination ("" = the destination root itself).</summary>
+    public string Prefix { get; init; } = "";
+
+    public List<SelectedFile> Files { get; init; } = [];
+    public List<string> Directories { get; init; } = [];
+    public long TotalBytes => Files.Sum(f => f.Entry.Length);
+}
+
+public enum CopyOutcome
+{
+    Copied,
+    Skipped,
+    DryRun,
+}
+
 /// <summary>
 /// Copies files between two <see cref="IFileTree"/>s (local ↔ SFTP ↔ SFTP), mirroring azcopy's
 /// semantics for --recursive, --as-subdir, wildcards, include/exclude patterns, overwrite and sync.
@@ -58,209 +83,202 @@ public sealed class TreeCopier(Action<string> output)
 {
     private static readonly TimeSpan TimeTolerance = TimeSpan.FromSeconds(2);
 
-    private sealed record Item(FileEntry Entry, string RelativePath);
-
-    public async Task<TreeCopyResult> CopyAsync(
-        IFileTree src, string srcPath, IFileTree dst, string dstPath, TreeCopyOptions o, CancellationToken ct)
+    /// <summary>Resolves what a source path selects (a file, a folder, or a wildcard in the last segment).</summary>
+    public async Task<SourceSelection> ResolveAsync(IFileTree src, string srcPath, TreeCopyOptions o, CancellationToken ct)
     {
-        var result = new TreeCopyResult();
         var include = o.IncludePatterns.Select(GlobToRegex).ToList();
         var exclude = o.ExcludePatterns.Select(GlobToRegex).ToList();
-
-        // ---- 1. Resolve the source selection -------------------------------------------------
         var name = src.GetName(srcPath);
-        Regex? topLevelPattern = null;
-        string root;
-        string prefix;
-        var files = new List<Item>();
+        var files = new List<SelectedFile>();
         var dirs = new List<string>();
 
         if (name.IndexOfAny(['*', '?']) >= 0)
         {
-            topLevelPattern = GlobToRegex(name);
-            root = src.GetParent(srcPath);
-            prefix = "";
-        }
-        else
-        {
-            var stat = await src.StatAsync(srcPath, ct).ConfigureAwait(false)
-                       ?? throw new FileNotFoundException($"The source '{srcPath}' was not found on {src.DisplayName}.");
-            if (!stat.IsDirectory)
-            {
-                result.SourceIsSingleFile = true;
-                files.Add(new Item(stat, stat.Name));
-                root = src.GetParent(srcPath);
-                prefix = "";
-            }
-            else
-            {
-                if (!o.Recursive && !o.SyncMode)
-                    throw new InvalidOperationException(
-                        "The source is a folder: set --recursive (Options tab) or use a wildcard such as folder/*.");
-                root = srcPath;
-                prefix = o.AsSubdir && !o.SyncMode ? stat.Name : "";
-            }
-        }
-
-        if (!result.SourceIsSingleFile)
-        {
             output($"INFO: Scanning {src.DisplayName} {srcPath} …");
-            await WalkAsync(src, root, "", topLevelPattern, include, exclude, o.Recursive || o.SyncMode, files, dirs, ct)
+            await WalkAsync(src, src.GetParent(srcPath), "", GlobToRegex(name), include, exclude, o.Recursive || o.SyncMode, files, dirs, ct)
                 .ConfigureAwait(false);
-            if (prefix.Length > 0)
-            {
-                files = files.Select(f => new Item(f.Entry, prefix + "/" + f.RelativePath)).ToList();
-                dirs = dirs.Select(d => prefix + "/" + d).Prepend(prefix).ToList();
-            }
-        }
-        else if (!Matches(files[0].Entry.Name, include, exclude))
-        {
-            files.Clear();
+            return new SourceSelection { Name = name, IsWildcard = true, Files = files, Directories = dirs };
         }
 
-        result.Total = files.Count;
-        var totalBytes = files.Sum(f => f.Entry.Length);
-
-        // ---- 2. Resolve the destination --------------------------------------------------------
-        Func<Item, string> targetOf = item => JoinRelative(dst, dstPath, item.RelativePath);
-
-        if (result.SourceIsSingleFile)
+        var stat = await src.StatAsync(srcPath, ct).ConfigureAwait(false)
+                   ?? throw new FileNotFoundException($"The source '{srcPath}' was not found on {src.DisplayName}.");
+        if (!stat.IsDirectory)
         {
-            var destStat = await dst.StatAsync(dstPath, ct).ConfigureAwait(false);
-            var destIsDir = destStat?.IsDirectory == true || dst.EndsWithSeparator(dstPath);
-            var single = destIsDir ? dst.Combine(dstPath, name) : dstPath;
+            if (Matches(stat.Name, include, exclude)) files.Add(new SelectedFile(stat, stat.Name));
+            return new SourceSelection { Name = stat.Name, IsSingleFile = true, Files = files };
+        }
+
+        if (!o.Recursive && !o.SyncMode)
+            throw new InvalidOperationException(
+                "The source is a folder: set --recursive (Options tab) or use a wildcard such as folder/*.");
+
+        output($"INFO: Scanning {src.DisplayName} {srcPath} …");
+        await WalkAsync(src, srcPath, "", null, include, exclude, true, files, dirs, ct).ConfigureAwait(false);
+        var prefix = o.AsSubdir && !o.SyncMode ? stat.Name : "";
+        if (prefix.Length > 0)
+        {
+            files = files.Select(f => new SelectedFile(f.Entry, prefix + "/" + f.RelativePath)).ToList();
+            dirs = dirs.Select(d => prefix + "/" + d).Prepend(prefix).ToList();
+        }
+
+        return new SourceSelection { Name = stat.Name, Prefix = prefix, Files = files, Directories = dirs };
+    }
+
+    /// <summary>Where a single-file selection goes: into the destination folder, or to the destination path as a file name.</summary>
+    public static async Task<string> SingleFileTargetAsync(IFileTree dst, string dstPath, string name, CancellationToken ct)
+    {
+        var destStat = await dst.StatAsync(dstPath, ct).ConfigureAwait(false);
+        var destIsDir = destStat?.IsDirectory == true || dst.EndsWithSeparator(dstPath);
+        return destIsDir ? dst.Combine(dstPath, name) : dstPath;
+    }
+
+    public async Task<TreeCopyResult> CopyAsync(
+        IFileTree src, string srcPath, IFileTree dst, string dstPath, TreeCopyOptions o, CancellationToken ct)
+    {
+        var selection = await ResolveAsync(src, srcPath, o, ct).ConfigureAwait(false);
+        var result = new TreeCopyResult { SourceIsSingleFile = selection.IsSingleFile, Total = selection.Files.Count };
+        var totalBytes = selection.TotalBytes;
+
+        Func<SelectedFile, string> targetOf = item => JoinRelative(dst, dstPath, item.RelativePath);
+        if (selection.IsSingleFile)
+        {
+            var single = await SingleFileTargetAsync(dst, dstPath, selection.Name, ct).ConfigureAwait(false);
             targetOf = _ => single;
             result.DestinationSelection = single;
         }
         else
         {
-            result.DestinationSelection = prefix.Length > 0 ? JoinRelative(dst, dstPath, prefix) : dstPath;
+            result.DestinationSelection = selection.Prefix.Length > 0 ? JoinRelative(dst, dstPath, selection.Prefix) : dstPath;
             if (!o.DryRun)
             {
                 await dst.CreateDirectoryAsync(dstPath, ct).ConfigureAwait(false);
-                foreach (var d in dirs) await dst.CreateDirectoryAsync(JoinRelative(dst, dstPath, d), ct).ConfigureAwait(false);
+                foreach (var d in selection.Directories)
+                    await dst.CreateDirectoryAsync(JoinRelative(dst, dstPath, d), ct).ConfigureAwait(false);
             }
         }
 
         output($"INFO: {result.Total} file(s), {FormatBytes(totalBytes)} to process: {src.DisplayName} → {dst.DisplayName}");
 
-        // ---- 3. Transfer ----------------------------------------------------------------------
-        var sw = Stopwatch.StartNew();
-        var lastReport = TimeSpan.Zero;
-        long bytesAtLastReport = 0;
-        var processedBytes = 0L;
-
-        void Report(bool force)
-        {
-            var now = sw.Elapsed;
-            if (!force && now - lastReport < TimeSpan.FromSeconds(1)) return;
-            var seconds = Math.Max((now - lastReport).TotalSeconds, 0.001);
-            var mbps = (result.Bytes - bytesAtLastReport) * 8 / 1_000_000.0 / seconds;
-            lastReport = now;
-            bytesAtLastReport = result.Bytes;
-            var processed = result.Done + result.Failed + result.Skipped;
-            var pct = totalBytes > 0 ? 100.0 * processedBytes / totalBytes
-                : result.Total > 0 ? 100.0 * processed / result.Total : 100.0;
-            output(string.Create(CultureInfo.InvariantCulture,
-                $"{Math.Min(pct, 100):0.0} %, {result.Done} Done, {result.Failed} Failed, {result.Total - processed} Pending, {result.Skipped} Skipped, {result.Total} Total, 2-sec Throughput (Mb/s): {mbps:0.####}"));
-        }
-
+        var progress = new ProgressReporter(output, result, totalBytes);
         var sourcePaths = new HashSet<string>(StringComparer.Ordinal);
-        foreach (var item in files)
+        foreach (var item in selection.Files)
         {
             ct.ThrowIfCancellationRequested();
-            var target = targetOf(item);
             sourcePaths.Add(item.RelativePath);
+            await CopyAndCountAsync(src, item.Entry, dst, targetOf(item), o, result, progress, ct).ConfigureAwait(false);
+        }
+
+        if (o.SyncMode && o.DeleteDestination && !selection.IsSingleFile)
+            await DeleteExtrasAsync(dst, dstPath, sourcePaths, o.DryRun, result, ct).ConfigureAwait(false);
+
+        progress.Report(force: true);
+        output($"Transferred {FormatBytes(result.Bytes)} in {progress.Elapsed:hh\\:mm\\:ss}" + (result.Deleted > 0 ? $", deleted {result.Deleted} file(s)" : ""));
+        return result;
+    }
+
+    /// <summary>Copies one file, updating the counters; failures are logged and counted, not thrown.</summary>
+    public async Task<CopyOutcome?> CopyAndCountAsync(IFileTree src, FileEntry entry, IFileTree dst, string target,
+        TreeCopyOptions o, TreeCopyResult result, ProgressReporter? progress, CancellationToken ct)
+    {
+        var before = result.Bytes;
+        try
+        {
+            var outcome = await CopyOneAsync(src, entry, dst, target, o, b =>
+            {
+                result.Bytes = before + b;
+                progress?.Report(force: false);
+            }, ct).ConfigureAwait(false);
+            switch (outcome)
+            {
+                case CopyOutcome.Skipped:
+                    result.Skipped++;
+                    break;
+                case CopyOutcome.DryRun:
+                    result.Done++;
+                    break;
+                default:
+                    result.Bytes = before + entry.Length;
+                    result.Done++;
+                    break;
+            }
+
+            return outcome;
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            result.Bytes = before;
+            result.Failed++;
+            output($"ERROR: failed to copy {entry.Path} → {target}: {ex.Message}");
+            return null;
+        }
+        finally
+        {
+            progress?.FileProcessed(entry.Length);
+        }
+    }
+
+    /// <summary>Copies one file (creating the parent folder), honouring overwrite / sync rules. Throws on failure.</summary>
+    public async Task<CopyOutcome> CopyOneAsync(IFileTree src, FileEntry entry, IFileTree dst, string target,
+        TreeCopyOptions o, Action<long> bytesProgress, CancellationToken ct)
+    {
+        var existing = await dst.StatAsync(target, ct).ConfigureAwait(false);
+        if (existing?.IsDirectory == true)
+            throw new IOException($"'{target}' is a directory at the destination.");
+        if (ShouldSkip(entry, existing, o)) return CopyOutcome.Skipped;
+
+        if (o.DryRun)
+        {
+            output($"DRYRUN: copy {entry.Path} → {target}");
+            return CopyOutcome.DryRun;
+        }
+
+        await dst.CreateDirectoryAsync(dst.GetParent(target), ct).ConfigureAwait(false);
+        if (dst.IsLocal)
+        {
+            await using var fs = new FileStream(target, FileMode.Create, FileAccess.Write, FileShare.None, 1 << 16, useAsync: true);
+            await src.ReadIntoAsync(entry.Path, fs, bytesProgress, ct).ConfigureAwait(false);
+        }
+        else
+        {
+            await using var stream = src.OpenRead(entry.Path);
+            await dst.WriteFromAsync(target, stream, bytesProgress, ct).ConfigureAwait(false);
+        }
+
+        await dst.SetLastWriteTimeUtcAsync(target, entry.LastWriteUtc, ct).ConfigureAwait(false);
+        return CopyOutcome.Copied;
+    }
+
+    /// <summary>Sync: deletes destination files whose relative path is not in <paramref name="keep"/>.</summary>
+    public async Task DeleteExtrasAsync(IFileTree dst, string dstPath, ISet<string> keep, bool dryRun,
+        TreeCopyResult result, CancellationToken ct)
+    {
+        if (await dst.StatAsync(dstPath, ct).ConfigureAwait(false) is not { IsDirectory: true }) return;
+        var destFiles = new List<SelectedFile>();
+        await WalkAsync(dst, dstPath, "", null, [], [], true, destFiles, [], ct).ConfigureAwait(false);
+        foreach (var extra in destFiles.Where(f => !keep.Contains(f.RelativePath)))
+        {
+            ct.ThrowIfCancellationRequested();
+            if (dryRun)
+            {
+                output($"DRYRUN: delete {extra.Entry.Path}");
+                continue;
+            }
+
             try
             {
-                var existing = await dst.StatAsync(target, ct).ConfigureAwait(false);
-                if (existing?.IsDirectory == true)
-                    throw new IOException($"'{target}' is a directory at the destination.");
-                if (ShouldSkip(item.Entry, existing, o))
-                {
-                    result.Skipped++;
-                    processedBytes += item.Entry.Length;
-                    Report(false);
-                    continue;
-                }
-
-                if (o.DryRun)
-                {
-                    output($"DRYRUN: copy {item.Entry.Path} → {target}");
-                    result.Done++;
-                    processedBytes += item.Entry.Length;
-                    continue;
-                }
-
-                if (result.SourceIsSingleFile) await dst.CreateDirectoryAsync(dst.GetParent(target), ct).ConfigureAwait(false);
-
-                var before = result.Bytes;
-                void OnProgress(long fileBytes)
-                {
-                    result.Bytes = before + fileBytes;
-                    Report(false);
-                }
-
-                if (dst.IsLocal)
-                {
-                    await using var fs = new FileStream(target, FileMode.Create, FileAccess.Write, FileShare.None, 1 << 16, useAsync: true);
-                    await src.ReadIntoAsync(item.Entry.Path, fs, OnProgress, ct).ConfigureAwait(false);
-                }
-                else
-                {
-                    await using var stream = src.OpenRead(item.Entry.Path);
-                    await dst.WriteFromAsync(target, stream, OnProgress, ct).ConfigureAwait(false);
-                }
-
-                result.Bytes = before + item.Entry.Length;
-                await dst.SetLastWriteTimeUtcAsync(target, item.Entry.LastWriteUtc, ct).ConfigureAwait(false);
-                result.Done++;
+                await dst.DeleteFileAsync(extra.Entry.Path, ct).ConfigureAwait(false);
+                result.Deleted++;
+                output($"INFO: deleted {extra.Entry.Path} (not present at the source)");
             }
-            catch (OperationCanceledException)
+            catch (Exception ex) when (ex is not OperationCanceledException)
             {
-                throw;
-            }
-            catch (Exception ex)
-            {
-                result.Failed++;
-                output($"ERROR: failed to copy {item.Entry.Path} → {target}: {ex.Message}");
-            }
-
-            processedBytes += item.Entry.Length;
-            Report(false);
-        }
-
-        // ---- 4. Sync: delete extra destination files -----------------------------------------------
-        if (o.SyncMode && o.DeleteDestination && !result.SourceIsSingleFile
-            && await dst.StatAsync(dstPath, ct).ConfigureAwait(false) is { IsDirectory: true })
-        {
-            var destFiles = new List<Item>();
-            await WalkAsync(dst, dstPath, "", null, [], [], true, destFiles, [], ct).ConfigureAwait(false);
-            foreach (var extra in destFiles.Where(f => !sourcePaths.Contains(f.RelativePath)))
-            {
-                ct.ThrowIfCancellationRequested();
-                if (o.DryRun)
-                {
-                    output($"DRYRUN: delete {extra.Entry.Path}");
-                    continue;
-                }
-
-                try
-                {
-                    await dst.DeleteFileAsync(extra.Entry.Path, ct).ConfigureAwait(false);
-                    result.Deleted++;
-                    output($"INFO: deleted {extra.Entry.Path} (not present at the source)");
-                }
-                catch (Exception ex) when (ex is not OperationCanceledException)
-                {
-                    output($"ERROR: failed to delete {extra.Entry.Path}: {ex.Message}");
-                }
+                output($"ERROR: failed to delete {extra.Entry.Path}: {ex.Message}");
             }
         }
-
-        Report(true);
-        output($"Transferred {FormatBytes(result.Bytes)} in {sw.Elapsed:hh\\:mm\\:ss}" + (result.Deleted > 0 ? $", deleted {result.Deleted} file(s)" : ""));
-        return result;
     }
 
     private static bool ShouldSkip(FileEntry source, FileEntry? existing, TreeCopyOptions o)
@@ -277,7 +295,7 @@ public sealed class TreeCopier(Action<string> output)
     }
 
     private static async Task WalkAsync(IFileTree tree, string dir, string relative, Regex? topLevelPattern,
-        List<Regex> include, List<Regex> exclude, bool recursive, List<Item> files, List<string> dirs, CancellationToken ct)
+        List<Regex> include, List<Regex> exclude, bool recursive, List<SelectedFile> files, List<string> dirs, CancellationToken ct)
     {
         foreach (var entry in (await tree.ListAsync(dir, ct).ConfigureAwait(false)).OrderBy(e => e.Name, StringComparer.Ordinal))
         {
@@ -292,7 +310,7 @@ public sealed class TreeCopier(Action<string> output)
             }
             else if (Matches(entry.Name, include, exclude))
             {
-                files.Add(new Item(entry, rel));
+                files.Add(new SelectedFile(entry, rel));
             }
         }
     }
@@ -301,7 +319,7 @@ public sealed class TreeCopier(Action<string> output)
         (include.Count == 0 || include.Any(r => r.IsMatch(name))) && !exclude.Any(r => r.IsMatch(name));
 
     /// <summary>Joins a '/'-separated relative path onto a destination root of the given tree.</summary>
-    private static string JoinRelative(IFileTree tree, string root, string relative)
+    public static string JoinRelative(IFileTree tree, string root, string relative)
     {
         var path = root;
         foreach (var part in relative.Split('/', StringSplitOptions.RemoveEmptyEntries)) path = tree.Combine(path, part);
@@ -328,5 +346,38 @@ public sealed class TreeCopier(Action<string> output)
         }
 
         return string.Create(CultureInfo.InvariantCulture, $"{v:0.##} {units[u]}");
+    }
+}
+
+/// <summary>Emits azcopy-style progress lines ("12.5 %, 3 Done, …") at most once per second.</summary>
+public sealed class ProgressReporter(Action<string> output, TreeCopyResult result, long totalBytes)
+{
+    private readonly Stopwatch _sw = Stopwatch.StartNew();
+    private TimeSpan _lastReport = TimeSpan.Zero;
+    private long _bytesAtLastReport;
+    private long _processedBytes;
+
+    public TimeSpan Elapsed => _sw.Elapsed;
+
+    /// <summary>Marks a file as processed (copied, skipped or failed) for the percentage.</summary>
+    public void FileProcessed(long bytes)
+    {
+        _processedBytes += bytes;
+        Report(force: false);
+    }
+
+    public void Report(bool force)
+    {
+        var now = _sw.Elapsed;
+        if (!force && now - _lastReport < TimeSpan.FromSeconds(1)) return;
+        var seconds = Math.Max((now - _lastReport).TotalSeconds, 0.001);
+        var mbps = (result.Bytes - _bytesAtLastReport) * 8 / 1_000_000.0 / seconds;
+        _lastReport = now;
+        _bytesAtLastReport = result.Bytes;
+        var processed = result.Done + result.Failed + result.Skipped;
+        var pct = totalBytes > 0 ? 100.0 * _processedBytes / totalBytes
+            : result.Total > 0 ? 100.0 * processed / result.Total : 100.0;
+        output(string.Create(CultureInfo.InvariantCulture,
+            $"{Math.Min(pct, 100):0.0} %, {result.Done} Done, {result.Failed} Failed, {Math.Max(result.Total - processed, 0)} Pending, {result.Skipped} Skipped, {result.Total} Total, 2-sec Throughput (Mb/s): {mbps:0.####}"));
     }
 }

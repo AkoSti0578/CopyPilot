@@ -1,13 +1,58 @@
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 using System.Text;
 
 namespace CopyPilot.Core.Services;
 
 /// <summary>Runs azcopy as a child process and streams its output line by line.</summary>
-public sealed class AzCopyRunner
+public sealed partial class AzCopyRunner
 {
     private Process? _current;
     private bool _stdinIsPipe;
+    private bool _suspended;
+
+    [LibraryImport("ntdll.dll")]
+    private static partial int NtSuspendProcess(IntPtr processHandle);
+
+    [LibraryImport("ntdll.dll")]
+    private static partial int NtResumeProcess(IntPtr processHandle);
+
+    [LibraryImport("libc", EntryPoint = "kill", SetLastError = true)]
+    private static partial int SysKill(int pid, int signal);
+
+    private const int SigStop = 19; // Linux
+    private const int SigCont = 18;
+
+    /// <summary>True while the running azcopy process is paused by <see cref="Suspend"/>.</summary>
+    public bool IsSuspended => _suspended;
+
+    /// <summary>Pauses the running azcopy process (used to keep the staging folder small). Returns false if nothing was paused.</summary>
+    public bool Suspend()
+    {
+        var p = _current;
+        if (p == null || _suspended || p.HasExited) return false;
+        _suspended = OperatingSystem.IsWindows() ? NtSuspendProcess(p.Handle) == 0 : SysKill(p.Id, SigStop) == 0;
+        return _suspended;
+    }
+
+    /// <summary>Resumes a process paused by <see cref="Suspend"/>.</summary>
+    public void Resume()
+    {
+        var p = _current;
+        if (p == null || !_suspended) return;
+        try
+        {
+            if (!p.HasExited)
+            {
+                if (OperatingSystem.IsWindows()) NtResumeProcess(p.Handle);
+                else SysKill(p.Id, SigCont);
+            }
+        }
+        finally
+        {
+            _suspended = false;
+        }
+    }
 
     /// <summary>
     /// Sends a line to azcopy's stdin, e.g. an answer to an interactive prompt
@@ -82,6 +127,7 @@ public sealed class AzCopyRunner
         {
             try
             {
+                Resume();
                 if (!process.HasExited) process.Kill(entireProcessTree: true);
             }
             catch (InvalidOperationException)

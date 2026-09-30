@@ -29,7 +29,9 @@ public sealed class ExecutionPlan
     public SftpRoute? Route { get; init; }
     public TreeCopyOptions? TreeOptions { get; init; }
     public string StagingRoot { get; init; } = "";
-    public bool KeepStagedFiles { get; init; }
+
+    /// <summary>Staging folder limit; files are deleted as soon as they are transferred. 0 = one file at a time.</summary>
+    public long StagingLimitBytes { get; init; } = TransferPlanner.DefaultStagingLimitMb * 1024 * 1024;
     public TimeSpan SftpTimeout { get; init; } = TimeSpan.FromSeconds(30);
 
     public List<string> Errors { get; } = [];
@@ -72,17 +74,17 @@ public sealed class ExecutionPlan
             {
                 sb.Append("# 1) CopyPilot SFTP download: ").Append(Loc(src)).Append(" → ").AppendLine(staging);
                 var leg = TransferPlanner.BuildAzCopyLeg(this, new LocationSpec { Kind = LocationKind.Local, LocalPath = Path.Combine(staging, "<selection>") }, null);
-                sb.Append("# 2) ").AppendLine(mask ? leg.ToDisplayString(exe) : leg.ToUnmaskedString(exe));
-                sb.Append("# 3) ").Append(KeepStagedFiles ? "keep" : "delete").Append(" the staged files");
+                sb.Append("# 2) per batch: ").AppendLine(mask ? leg.ToDisplayString(exe) : leg.ToUnmaskedString(exe));
+                sb.Append("# 3) permanently delete each batch from the staging folder (limit ").Append(StagingArea.Describe(StagingLimitBytes)).Append(')');
                 break;
             }
             case SftpRoute.CloudToSftp:
             {
                 var leg = TransferPlanner.BuildAzCopyLeg(this, null, new LocationSpec { Kind = LocationKind.Local, LocalPath = staging });
                 sb.Append("# 1) ").AppendLine(mask ? leg.ToDisplayString(exe) : leg.ToUnmaskedString(exe));
-                sb.Append("# 2) CopyPilot SFTP upload: ").Append(staging).Append(" → ").Append(Loc(dst))
+                sb.Append("# 2) CopyPilot uploads each completed file to ").Append(Loc(dst))
                     .Append("  (").Append(DescribeOptions()).AppendLine(")");
-                sb.Append("# 3) ").Append(KeepStagedFiles ? "keep" : "delete").Append(" the staged files");
+                sb.Append("# 3) and permanently deletes it from the staging folder (limit ").Append(StagingArea.Describe(StagingLimitBytes)).Append("; azcopy is paused when it is exceeded)");
                 break;
             }
         }
@@ -118,6 +120,8 @@ public static class TransferPlanner
     };
 
     public static string DefaultStagingRoot => Path.Combine(Path.GetTempPath(), "CopyPilot", "staging");
+
+    public const long DefaultStagingLimitMb = 256;
 
     public static ExecutionPlan Plan(CommandRequest request)
     {
@@ -170,7 +174,7 @@ public static class TransferPlanner
             Route = route,
             TreeOptions = tree,
             StagingRoot = opts.GetValueOrDefault("sftp-staging-folder") is { Length: > 0 } s ? s : DefaultStagingRoot,
-            KeepStagedFiles = IsTrue(opts, "sftp-keep-staged-files"),
+            StagingLimitBytes = (long)(ParseNumber(opts.GetValueOrDefault("sftp-staging-limit-mb")) is { } mb and >= 0 ? mb : DefaultStagingLimitMb) * 1024 * 1024,
             SftpTimeout = TimeSpan.FromSeconds(
                 double.TryParse(opts.GetValueOrDefault("sftp-timeout-seconds"), NumberStyles.Float, CultureInfo.InvariantCulture, out var t) && t > 0 ? t : 30),
         };
@@ -181,8 +185,12 @@ public static class TransferPlanner
             plan.Errors.Add("Pipes cannot be combined with SFTP.");
         if (opts.GetValueOrDefault("overwrite") is "prompt" || opts.GetValueOrDefault("delete-destination") is "prompt")
             plan.Warnings.Add("'prompt' is not supported for SFTP and is treated as 'false'.");
-        if (opts.GetValueOrDefault("sftp-timeout-seconds") is { Length: > 0 } ts && !double.TryParse(ts, NumberStyles.Float, CultureInfo.InvariantCulture, out _))
+        if (opts.GetValueOrDefault("sftp-timeout-seconds") is { Length: > 0 } ts && ParseNumber(ts) == null)
             plan.Errors.Add("sftp-timeout-seconds must be a number.");
+        if (opts.GetValueOrDefault("sftp-staging-limit-mb") is { Length: > 0 } lim && ParseNumber(lim) is null or < 0)
+            plan.Errors.Add("sftp-staging-limit-mb must be 0 or a positive number.");
+        if (route == SftpRoute.SftpToCloud && tree.DeleteDestination)
+            plan.Warnings.Add("--delete-destination is not supported when syncing from SFTP to cloud storage (files are uploaded in batches) and is ignored.");
 
         if (route == SftpRoute.Direct)
         {
@@ -218,6 +226,8 @@ public static class TransferPlanner
 
         if (stagedSource != null)
         {
+            // Batches only contain part of the source, so azcopy must never delete "extra" destination files.
+            if (userOptions.ContainsKey("delete-destination")) userOptions["delete-destination"] = "false";
             return CommandBuilder.Build(new CommandRequest
             {
                 Command = request.Command,
@@ -246,6 +256,9 @@ public static class TransferPlanner
             ExtraArguments = request.ExtraArguments,
         });
     }
+
+    private static double? ParseNumber(string? s) =>
+        double.TryParse(s, NumberStyles.Float, CultureInfo.InvariantCulture, out var d) ? d : null;
 
     private static bool IsTrue(Dictionary<string, string> o, string name) =>
         o.TryGetValue(name, out var v) && string.Equals(v, "true", StringComparison.OrdinalIgnoreCase);

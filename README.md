@@ -43,8 +43,8 @@ Pick **SFTP server (SSH)** as the source or destination of **Copy** or **Sync**:
 | Route | How it runs |
 | --- | --- |
 | Local ↔ SFTP, SFTP ↔ SFTP | Directly by CopyPilot |
-| SFTP → Azure (Blob / ADLS Gen2 / Files) | CopyPilot downloads to a local staging folder, then AzCopy uploads with all your options |
-| Azure / S3 / GCS → SFTP | AzCopy downloads to a local staging folder, then CopyPilot uploads |
+| SFTP → Azure (Blob / ADLS Gen2 / Files) | CopyPilot downloads a batch into a local staging folder, AzCopy uploads it with all your options, and the batch is permanently deleted before the next one |
+| Azure / S3 / GCS → SFTP | AzCopy downloads into a local staging folder; CopyPilot uploads each completed file right away and permanently deletes it |
 
 - **Authentication:** password (also used for keyboard-interactive), private key (OpenSSH, PEM or PuTTY `.ppk`, with an optional passphrase), or both.
 - **Host keys:** the server key is trusted on first use and stored in `%APPDATA%\CopyPilot\known_hosts`.
@@ -52,8 +52,16 @@ Pick **SFTP server (SSH)** as the source or destination of **Copy** or **Sync**:
 - **Supported options:** `--recursive`, `--as-subdir`, `--include-pattern`, `--exclude-pattern`, `--overwrite` (true/false/ifSourceNewer)
   and `--dry-run`. For Sync, files are compared by size and last-modified time, and `--delete-destination` is supported.
   Wildcards such as `/data/*.csv` also work. Last-modified times are preserved.
+- **Small staging area:** every staged file is permanently deleted as soon as it has been transferred. The delete bypasses
+  the Recycle Bin, like Shift+Delete. The staging size is limited by *sftp-staging-limit-mb* (default 256 MB):
+  - SFTP → cloud uploads in batches up to that size.
+  - Cloud → SFTP pauses AzCopy while completed files wait for the SFTP upload.
+  - `0` means one file at a time. This uses the least space, but is slower for many small files.
+  - A single file larger than the limit is still staged as a whole.
+  - The job's staging folder is removed at the end, also when a job is cancelled or fails.
 - **CopyPilot settings** in the *SFTP* group on the Options tab: the staging folder (default `%TEMP%\CopyPilot\staging`),
-  keeping the staged files, and the connection timeout. Staged files are deleted after the transfer by default.
+  the staging limit and the connection timeout.
+- **Sync limitation:** when syncing SFTP → cloud, `--delete-destination` is not available, because files are uploaded in batches.
 - Transfers that involve SFTP can't be exported as an AzCopy script. Save them as a profile instead.
 
 ## Install

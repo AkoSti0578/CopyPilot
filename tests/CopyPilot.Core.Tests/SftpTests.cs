@@ -185,11 +185,11 @@ public class TransferPlannerTests
             Command = CommandCatalog.Get(CommandCatalog.Copy),
             Source = Sftp,
             Destination = Blob,
-            Options = new Dictionary<string, string> { ["recursive"] = "true", ["block-blob-tier"] = "Cool", ["sftp-keep-staged-files"] = "true" },
+            Options = new Dictionary<string, string> { ["recursive"] = "true", ["block-blob-tier"] = "Cool", ["sftp-staging-limit-mb"] = "0" },
         });
         Assert.True(plan.IsValid, string.Join(", ", plan.Errors));
         Assert.Equal(SftpRoute.SftpToCloud, plan.Route);
-        Assert.True(plan.KeepStagedFiles);
+        Assert.Equal(0, plan.StagingLimitBytes);
 
         var leg = TransferPlanner.BuildAzCopyLeg(plan, new LocationSpec { LocalPath = "/stage/in" }, null);
         Assert.Equal(["copy", "/stage/in", "https://acct.blob.core.windows.net/c?sv=1&sig=SECRET", "--recursive", "--block-blob-tier=Cool"], leg.Arguments);
@@ -349,7 +349,8 @@ public class SftpIntegrationTests
 
 /// <summary>
 /// Staged SFTP ↔ cloud routes with a fake azcopy shell script (Linux/macOS only, needs COPYPILOT_SFTP_TEST).
-/// The fake maps the "cloud" URL to the folder in FAKE_CLOUD_DIR.
+/// The fake maps the "cloud" URL to a local folder. Like the real azcopy it downloads to ".azDownload-…"
+/// temp names and renames them when complete, and it reports how many finished files are in staging.
 /// </summary>
 public class StagedRouteTests
 {
@@ -362,16 +363,20 @@ public class StagedRouteTests
 
     private static string FakeAzCopy(TempDir dir, string cloudDir)
     {
-        // Records the arguments, then copies: URL → cloud dir, local → cloud dir or cloud dir → local.
         var script = Path.Combine(dir.Path, "azcopy");
         File.WriteAllText(script, $$"""
             #!/bin/sh
-            echo "ARGS: $*"
+            echo "ARGS: $* TEMP=$AZCOPY_DOWNLOAD_TO_TEMP_PATH"
             src="$2"; dst="$3"
-            case "$src" in https://*) src="{{cloudDir}}/*";; esac
-            case "$dst" in https://*) dst="{{cloudDir}}";; esac
-            mkdir -p "$dst"
-            cp -rp $src "$dst"/ || exit 1
+            case "$dst" in
+              https://*) cp -rp $src "{{cloudDir}}"/ || exit 1 ;;
+              *) cd "{{cloudDir}}" || exit 1
+                 for f in $(find . -type f | sort); do
+                   echo "STAGED=$(find "$dst" -type f ! -name '.azDownload-*' | wc -l)"
+                   d="$dst/$(dirname "$f")"; b=$(basename "$f"); mkdir -p "$d"
+                   cp -p "$f" "$d/.azDownload-job-$b"; sleep 0.3; mv "$d/.azDownload-job-$b" "$d/$b"
+                 done ;;
+            esac
             echo "Final Job Status: Completed"
             """.Replace("\r\n", "\n"));
         File.SetUnixFileMode(script, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
@@ -379,7 +384,7 @@ public class StagedRouteTests
     }
 
     [Fact]
-    public async Task Sftp_to_cloud_and_back()
+    public async Task Sftp_to_cloud_and_back_keeps_staging_small()
     {
         if (Config == null || OperatingSystem.IsWindows()) return;
         using var tools = new TempDir();
@@ -391,47 +396,67 @@ public class StagedRouteTests
         var runner = new TransferRunner(new AzCopyRunner()) { KnownHostsFile = Path.Combine(tools.Path, "known_hosts") };
         var log = new List<string>();
         var url = new LocationSpec { Kind = LocationKind.CustomUrl, Url = "https://acct.blob.core.windows.net/c" };
-        var staging = new Dictionary<string, string> { ["recursive"] = "true", ["sftp-staging-folder"] = stage.Path };
+        var oneAtATime = new Dictionary<string, string>
+        {
+            ["recursive"] = "true", ["sftp-staging-folder"] = stage.Path, ["sftp-staging-limit-mb"] = "0",
+        };
+        Task<int> Run(ExecutionPlan p, string? azcopy) =>
+            runner.RunAsync(p, azcopy, new Dictionary<string, string>(), (l, _) => log.Add(l), CancellationToken.None);
 
-        // Seed the SFTP server.
+        // Seed the SFTP server with 3 files.
         local.Write("in/one.txt", "1");
         local.Write("in/sub/two.txt", "22");
-        var seed = TransferPlanner.Plan(new CommandRequest
+        local.Write("in/sub/three.txt", "333");
+        Assert.Equal(0, await Run(TransferPlanner.Plan(new CommandRequest
         {
             Command = CommandCatalog.Get(CommandCatalog.Copy),
             Source = new LocationSpec { LocalPath = Path.Combine(local.Path, "in") }, Destination = Server(remote),
             Options = new Dictionary<string, string> { ["recursive"] = "true" },
-        });
-        Assert.Equal(0, await runner.RunAsync(seed, null, new Dictionary<string, string>(), (l, _) => log.Add(l), CancellationToken.None));
+        }), null));
 
-        // SFTP → "cloud": staged download, then azcopy uploads <stage>/in.
-        var toCloud = TransferPlanner.Plan(new CommandRequest
-        {
-            Command = CommandCatalog.Get(CommandCatalog.Copy), Source = Server(remote + "/in"), Destination = url, Options = staging,
-        });
-        Assert.Equal(0, await runner.RunAsync(toCloud, exe, new Dictionary<string, string>(), (l, _) => log.Add(l), CancellationToken.None));
-        Assert.Equal(["in/one.txt", "in/sub/two.txt"], cloud.Files());
-        Assert.Contains(log, l => l.StartsWith("ARGS: copy ") && l.Contains("/in https://acct.blob.core.windows.net/c --recursive"));
-        Assert.Empty(stage.Files()); // staging cleaned up
-
-        // "cloud" → SFTP: azcopy downloads to staging, CopyPilot uploads.
-        var toSftp = TransferPlanner.Plan(new CommandRequest
-        {
-            Command = CommandCatalog.Get(CommandCatalog.Copy), Source = url, Destination = Server(remote + "/back"), Options = staging,
-        });
+        // SFTP → "cloud", one file at a time: 3 azcopy runs, each on <stage>/in, staging empty afterwards.
         log.Clear();
-        Assert.Equal(0, await runner.RunAsync(toSftp, exe, new Dictionary<string, string>(), (l, _) => log.Add(l), CancellationToken.None));
-        Assert.Contains(log, l => l.Contains("--preserve-last-modified-time"));
-        Assert.Contains(log, l => l.StartsWith("100.0 %, 2 Done"));
+        Assert.Equal(0, await Run(TransferPlanner.Plan(new CommandRequest
+        {
+            Command = CommandCatalog.Get(CommandCatalog.Copy), Source = Server(remote + "/in"), Destination = url, Options = oneAtATime,
+        }), exe));
+        Assert.Equal(["in/one.txt", "in/sub/three.txt", "in/sub/two.txt"], cloud.Files());
+        Assert.Equal(3, log.Count(l => l.StartsWith("ARGS: copy ") && l.Contains("/in https://acct.blob.core.windows.net/c --recursive")));
+        Assert.Contains("Final Job Status: Completed", log);
+        Assert.Empty(Directory.GetFileSystemEntries(stage.Path));
 
-        // Verify by downloading what landed on the server.
+        // Larger limit: a single batch.
+        log.Clear();
+        var batched = new Dictionary<string, string>(oneAtATime) { ["sftp-staging-limit-mb"] = "10" };
+        Assert.Equal(0, await Run(TransferPlanner.Plan(new CommandRequest
+        {
+            Command = CommandCatalog.Get(CommandCatalog.Copy), Source = Server(remote + "/in"), Destination = url, Options = batched,
+        }), exe));
+        Assert.Equal(1, log.Count(l => l.StartsWith("ARGS: copy ")));
+
+        // "cloud" → SFTP: every completed file is uploaded and deleted right away; azcopy is paused meanwhile.
+        log.Clear();
+        Assert.Equal(0, await Run(TransferPlanner.Plan(new CommandRequest
+        {
+            Command = CommandCatalog.Get(CommandCatalog.Copy), Source = url, Destination = Server(remote + "/back"), Options = oneAtATime,
+        }), exe));
+        Assert.Contains(log, l => l.StartsWith("ARGS: copy ") && l.Contains("--preserve-last-modified-time") && l.EndsWith("TEMP=true"));
+        Assert.Contains(log, l => l.Contains("azcopy is paused"));
+        Assert.Contains(log, l => l.StartsWith("100.0 %, 3 Done, 0 Failed, 0 Pending"));
+        var staged = log.Where(l => l.StartsWith("STAGED=")).Select(l => int.Parse(l[7..].Trim())).ToList();
+        Assert.Equal(3, staged.Count);
+        // A finished file must be unchanged for two scans before it is picked up (so azcopy is really done with it);
+        // with a 0 MB limit at most one more file can finish during that window.
+        Assert.True(staged.Max() <= 2, "staging held too many finished files: " + string.Join(",", staged));
+        Assert.Empty(Directory.GetFileSystemEntries(stage.Path));
+
+        // Verify what landed on the server.
         using var check = new TempDir();
-        var verify = TransferPlanner.Plan(new CommandRequest
+        Assert.Equal(0, await Run(TransferPlanner.Plan(new CommandRequest
         {
             Command = CommandCatalog.Get(CommandCatalog.Copy), Source = Server(remote + "/back/*"),
             Destination = new LocationSpec { LocalPath = check.Path }, Options = new Dictionary<string, string> { ["recursive"] = "true" },
-        });
-        Assert.Equal(0, await runner.RunAsync(verify, null, new Dictionary<string, string>(), (l, _) => log.Add(l), CancellationToken.None));
-        Assert.Equal(["in/one.txt", "in/sub/two.txt"], check.Files());
+        }), null));
+        Assert.Equal(["in/one.txt", "in/sub/three.txt", "in/sub/two.txt"], check.Files());
     }
 }

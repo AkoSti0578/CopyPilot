@@ -204,7 +204,9 @@ public static class OptionCatalog
         new("sftp-staging-folder", OptionKind.FolderPath, CatSftp,
             "Local folder used to stage files when copying between SFTP and cloud storage. Default: %TEMP%\\CopyPilot\\staging.",
             Cmds(Copy, Sync), CopyPilotOnly: true),
-        Flag("sftp-keep-staged-files", CatSftp, "Keep the staged files after an SFTP ↔ cloud transfer (they are deleted by default).", Cmds(Copy, Sync)) with { CopyPilotOnly = true },
+        Num("sftp-staging-limit-mb", CatSftp,
+            "Maximum size of the staging folder in MB. Each file is permanently deleted (like Shift+Delete, no Recycle Bin) as soon as it has been transferred. SFTP → cloud uploads in batches of up to this size; cloud → SFTP pauses azcopy while the limit is exceeded. 0 = one file at a time (slower for many small files).",
+            Cmds(Copy, Sync), "256") with { CopyPilotOnly = true },
         Num("sftp-timeout-seconds", CatSftp, "SSH connection timeout in seconds.", Cmds(Copy, Sync), "30") with { CopyPilotOnly = true },
     ];
 
