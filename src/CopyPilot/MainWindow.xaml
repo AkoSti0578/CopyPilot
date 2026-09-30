@@ -1,0 +1,515 @@
+<Window x:Class="CopyPilot.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        xmlns:vm="clr-namespace:CopyPilot.ViewModels"
+        xmlns:v="clr-namespace:CopyPilot.Views"
+        mc:Ignorable="d"
+        d:DataContext="{d:DesignInstance Type=vm:MainViewModel}"
+        Title="{Binding WindowTitle}"
+        Icon="Assets/copypilot.ico"
+        Width="1240" Height="900" MinWidth="960" MinHeight="660"
+        WindowStartupLocation="CenterScreen"
+        Background="{StaticResource WindowBrush}"
+        FontFamily="Segoe UI" FontSize="13"
+        TextOptions.TextFormattingMode="Display">
+
+    <Window.InputBindings>
+        <KeyBinding Key="F5" Command="{Binding RunCommand}" />
+        <KeyBinding Key="Escape" Command="{Binding CancelCommand}" />
+        <KeyBinding Key="S" Modifiers="Control" Command="{Binding SaveProfileCommand}" />
+        <KeyBinding Key="O" Modifiers="Control" Command="{Binding LoadProfileCommand}" />
+        <KeyBinding Key="N" Modifiers="Control" Command="{Binding NewProfileCommand}" />
+    </Window.InputBindings>
+
+    <Window.Resources>
+        <!-- Editors for one option / environment variable -->
+        <DataTemplate x:Key="FlagEditor" DataType="{x:Type vm:OptionViewModel}">
+            <StackPanel Orientation="Horizontal">
+                <CheckBox IsThreeState="True" IsChecked="{Binding BoolValue}" VerticalAlignment="Center"
+                          ToolTip="Click to cycle: on → off → not set (use azcopy's default)" />
+                <TextBlock Text="{Binding FlagStateText}" Margin="8,0,0,0" VerticalAlignment="Center"
+                           Foreground="{StaticResource SecondaryTextBrush}" />
+            </StackPanel>
+        </DataTemplate>
+
+        <DataTemplate x:Key="TextEditor" DataType="{x:Type vm:OptionViewModel}">
+            <TextBox Text="{Binding Value, UpdateSourceTrigger=PropertyChanged}" Style="{StaticResource MonoTextBox}" />
+        </DataTemplate>
+
+        <DataTemplate x:Key="ChoiceEditor" DataType="{x:Type vm:OptionViewModel}">
+            <ComboBox IsEditable="True" ItemsSource="{Binding Choices}" Text="{Binding Value, UpdateSourceTrigger=PropertyChanged}"
+                      FontFamily="{StaticResource MonoFont}" />
+        </DataTemplate>
+
+        <DataTemplate x:Key="PathEditor" DataType="{x:Type vm:OptionViewModel}">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <TextBox Text="{Binding Value, UpdateSourceTrigger=PropertyChanged}" Style="{StaticResource MonoTextBox}" />
+                <Button Grid.Column="1" Content="Browse…" Margin="6,0,0,0" Command="{Binding BrowseCommand}" />
+            </Grid>
+        </DataTemplate>
+
+        <DataTemplate x:Key="SecretEditor" DataType="{x:Type vm:OptionViewModel}">
+            <PasswordBox v:PasswordBoxAssistant.BoundPassword="{Binding Value, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                         ToolTip="Secret value: masked in the preview and never saved to the last session." />
+        </DataTemplate>
+
+        <v:OptionTemplateSelector x:Key="OptionEditorSelector"
+                                  FlagTemplate="{StaticResource FlagEditor}"
+                                  TextTemplate="{StaticResource TextEditor}"
+                                  ChoiceTemplate="{StaticResource ChoiceEditor}"
+                                  PathTemplate="{StaticResource PathEditor}"
+                                  SecretTemplate="{StaticResource SecretEditor}" />
+
+        <DataTemplate x:Key="OptionRow" DataType="{x:Type vm:OptionViewModel}">
+            <Border x:Name="Row" BorderBrush="{StaticResource BorderBrush}" BorderThickness="0,0,0,1" Padding="4,8" Background="Transparent">
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="300" />
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                    </Grid.RowDefinitions>
+                    <StackPanel VerticalAlignment="Center" Margin="0,0,12,0">
+                        <TextBlock x:Name="OptName" Text="{Binding DisplayName}" FontFamily="{StaticResource MonoFont}" FontSize="13" />
+                        <TextBlock Text="{Binding DefaultText}" Style="{StaticResource Hint}" Margin="0"
+                                   Visibility="{Binding DefaultText, Converter={StaticResource EmptyToCollapsed}}" />
+                    </StackPanel>
+                    <ContentControl Grid.Column="1" Content="{Binding}" ContentTemplateSelector="{StaticResource OptionEditorSelector}"
+                                    VerticalAlignment="Center" Focusable="False" />
+                    <Button Grid.Column="2" Content="✕" Margin="8,0,0,0" Padding="8,2" Command="{Binding ClearCommand}"
+                            ToolTip="Reset (use azcopy's default)" VerticalAlignment="Center" />
+                    <TextBlock Grid.Row="1" Grid.ColumnSpan="3" Text="{Binding Description}" Style="{StaticResource Hint}" Margin="0,4,0,0" />
+                </Grid>
+            </Border>
+            <DataTemplate.Triggers>
+                <DataTrigger Binding="{Binding IsSet}" Value="True">
+                    <Setter TargetName="Row" Property="Background" Value="{StaticResource AccentLightBrush}" />
+                    <Setter TargetName="OptName" Property="FontWeight" Value="Bold" />
+                    <Setter TargetName="OptName" Property="Foreground" Value="{StaticResource AccentDarkBrush}" />
+                </DataTrigger>
+            </DataTemplate.Triggers>
+        </DataTemplate>
+
+        <GroupStyle x:Key="CategoryGroupStyle">
+            <GroupStyle.HeaderTemplate>
+                <DataTemplate>
+                    <TextBlock Text="{Binding Name}" FontSize="14" FontWeight="SemiBold" Foreground="{StaticResource AccentBrush}"
+                               Margin="0,16,0,4" />
+                </DataTemplate>
+            </GroupStyle.HeaderTemplate>
+        </GroupStyle>
+    </Window.Resources>
+
+    <DockPanel>
+        <!-- ============ Header ============ -->
+        <Border DockPanel.Dock="Top" Background="{StaticResource HeaderBrush}" Padding="20,12">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <Image Source="Assets/copypilot.png" Width="44" Height="44" Margin="0,0,14,0" RenderOptions.BitmapScalingMode="HighQuality" />
+                <StackPanel Grid.Column="1" VerticalAlignment="Center">
+                    <TextBlock Text="CopyPilot" FontSize="24" FontWeight="Bold" Foreground="White" />
+                    <TextBlock Foreground="#DCE9FA" FontSize="12.5">
+                        <Run Text="The graphical cockpit for Microsoft AzCopy" />
+                        <Run Text="  ·  " />
+                        <Run Text="created by" />
+                        <Run Text="{Binding AuthorName, Mode=OneWay}" FontWeight="SemiBold" Foreground="White" />
+                    </TextBlock>
+                </StackPanel>
+                <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center">
+                    <Button Content="New" Style="{StaticResource HeaderButton}" Command="{Binding NewProfileCommand}" ToolTip="Start over (Ctrl+N)" />
+                    <Button Content="Open profile…" Style="{StaticResource HeaderButton}" Command="{Binding LoadProfileCommand}" ToolTip="Ctrl+O" />
+                    <Button Content="Save profile…" Style="{StaticResource HeaderButton}" Command="{Binding SaveProfileCommand}" ToolTip="Ctrl+S" />
+                </StackPanel>
+            </Grid>
+        </Border>
+
+        <!-- ============ Status bar ============ -->
+        <Border DockPanel.Dock="Bottom" Background="{StaticResource SurfaceBrush}" BorderBrush="{StaticResource BorderBrush}" BorderThickness="0,1,0,0" Padding="16,5">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <TextBlock Text="{Binding StatusText}" TextTrimming="CharacterEllipsis" Foreground="{StaticResource SecondaryTextBrush}" />
+                <TextBlock Grid.Column="1" Margin="16,0" Foreground="{StaticResource SecondaryTextBrush}">
+                    <Run Text="AzCopy" />
+                    <Run Text="{Binding AzCopyVersion, Mode=OneWay}" FontWeight="SemiBold" />
+                </TextBlock>
+                <TextBlock Grid.Column="2" Text="{Binding CopyrightText}" Foreground="{StaticResource SecondaryTextBrush}" />
+            </Grid>
+        </Border>
+
+        <!-- ============ Command preview & run bar ============ -->
+        <Border DockPanel.Dock="Bottom" Style="{StaticResource Card}" Margin="16,0,16,10" Padding="14,10">
+            <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                </Grid.RowDefinitions>
+                <DockPanel>
+                    <TextBlock Text="Command preview" FontWeight="SemiBold" DockPanel.Dock="Left" />
+                    <TextBlock Text="{Binding ValidationText}" Margin="12,0,0,0" TextTrimming="CharacterEllipsis">
+                        <TextBlock.Style>
+                            <Style TargetType="TextBlock">
+                                <Setter Property="Foreground" Value="{StaticResource WarningBrush}" />
+                                <Style.Triggers>
+                                    <DataTrigger Binding="{Binding IsValid}" Value="True">
+                                        <Setter Property="Foreground" Value="{StaticResource SuccessBrush}" />
+                                    </DataTrigger>
+                                </Style.Triggers>
+                            </Style>
+                        </TextBlock.Style>
+                    </TextBlock>
+                </DockPanel>
+                <TextBox Grid.Row="1" Margin="0,6" Text="{Binding CommandPreview, Mode=OneWay}" IsReadOnly="True"
+                         Style="{StaticResource MonoTextBox}" TextWrapping="Wrap" MaxHeight="90" MinHeight="44"
+                         VerticalContentAlignment="Top" VerticalScrollBarVisibility="Auto"
+                         Background="{StaticResource WindowBrush}" />
+                <Grid Grid.Row="2">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <StackPanel VerticalAlignment="Center" Margin="0,0,16,0">
+                        <ProgressBar Value="{Binding Percent, Mode=OneWay}" Maximum="100" IsIndeterminate="{Binding IsIndeterminate}" />
+                        <TextBlock Margin="0,4,0,0" Foreground="{StaticResource SecondaryTextBrush}" TextTrimming="CharacterEllipsis">
+                            <Run Text="{Binding Percent, Mode=OneWay, StringFormat={}{0:0.0} %}" FontWeight="SemiBold" />
+                            <Run Text="  " />
+                            <Run Text="{Binding CountsText, Mode=OneWay}" />
+                        </TextBlock>
+                    </StackPanel>
+                    <StackPanel Grid.Column="1" Orientation="Horizontal">
+                        <Button Content="Copy command" Margin="0,0,6,0" Command="{Binding CopyCommandLineCommand}"
+                                ToolTip="Copy the command with secrets masked (safe to share)" />
+                        <Button Content="Copy with secrets" Margin="0,0,6,0" Command="{Binding CopyCommandLineWithSecretsCommand}"
+                                ToolTip="Copy the full command including SAS tokens and secrets" />
+                        <Button Content="Export script…" Margin="0,0,12,0" Command="{Binding SaveScriptCommand}"
+                                ToolTip="Save as a PowerShell (.ps1) or batch (.cmd) script, e.g. for Task Scheduler" />
+                        <Button Content="■  Cancel" Margin="0,0,6,0" Command="{Binding CancelCommand}" ToolTip="Stop the running job (Esc)" />
+                        <Button Content="▶  Run" Style="{StaticResource AccentButton}" Command="{Binding RunCommand}" ToolTip="Run azcopy (F5)" />
+                    </StackPanel>
+                </Grid>
+            </Grid>
+        </Border>
+
+        <!-- ============ Tabs ============ -->
+        <TabControl Margin="16,8,16,10" SelectedIndex="{Binding SelectedTabIndex}">
+
+            <!-- 0: Transfer -->
+            <TabItem Header="Transfer">
+                <ScrollViewer VerticalScrollBarVisibility="Auto">
+                    <StackPanel Margin="0,0,6,0">
+                        <Border Style="{StaticResource Card}">
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="Auto" />
+                                    <ColumnDefinition Width="280" />
+                                    <ColumnDefinition Width="*" />
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Text="Command" Style="{StaticResource SectionHeader}" Margin="0,0,16,0" VerticalAlignment="Center" />
+                                <ComboBox Grid.Column="1" ItemsSource="{Binding AvailableCommands}" SelectedItem="{Binding SelectedCommand}"
+                                          DisplayMemberPath="Title" FontWeight="SemiBold" />
+                                <TextBlock Grid.Column="2" Text="{Binding SelectedCommand.Description}" Style="{StaticResource Hint}"
+                                           Margin="16,0,0,0" VerticalAlignment="Center" />
+                            </Grid>
+                        </Border>
+
+                        <!-- Source & destination -->
+                        <Grid Visibility="{Binding ShowSourceAndDestination, Converter={StaticResource BoolToVis}}" Margin="0,0,0,12">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+                            <v:LocationEditor DataContext="{Binding Source}" />
+                            <Button Grid.Column="1" Content="⇄" FontSize="18" Margin="10,0" Padding="10,4" VerticalAlignment="Center"
+                                    Command="{Binding SwapLocationsCommand}" ToolTip="Swap source and destination" />
+                            <v:LocationEditor Grid.Column="2" DataContext="{Binding Destination}" />
+                        </Grid>
+
+                        <!-- Single target -->
+                        <Grid Visibility="{Binding ShowTarget, Converter={StaticResource BoolToVis}}" Margin="0,0,0,12">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+                            <v:LocationEditor DataContext="{Binding Target}" />
+                            <TextBlock Grid.Column="1" Margin="16,8,0,0" Style="{StaticResource Hint}" FontSize="12.5">
+                                <Run Text="{Binding TargetLabel, Mode=OneWay}" FontWeight="SemiBold" />
+                                <LineBreak />
+                                <Run Text="Pick the storage service, account and (optionally) container and path. More settings are on the Options tab." />
+                            </TextBlock>
+                        </Grid>
+
+                        <!-- Job id -->
+                        <Border Style="{StaticResource Card}" Visibility="{Binding ShowJobId, Converter={StaticResource BoolToVis}}">
+                            <StackPanel>
+                                <TextBlock Text="Job" Style="{StaticResource SectionHeader}" />
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBox Text="{Binding JobId, UpdateSourceTrigger=PropertyChanged}" Style="{StaticResource MonoTextBox}"
+                                             ToolTip="Job id, e.g. 1f3c2b4a-1111-2222-3333-444455556666" />
+                                    <Button Grid.Column="1" Content="List jobs" Margin="6,0,0,0" Command="{Binding QuickCommand}" CommandParameter="jobs list" />
+                                </Grid>
+                                <TextBlock Text="The id of the last started job is shown in the Output tab and in 'Jobs: list'." Style="{StaticResource Hint}" />
+                            </StackPanel>
+                        </Border>
+
+                        <!-- No positional -->
+                        <Border Style="{StaticResource Card}" Visibility="{Binding ShowNoLocation, Converter={StaticResource BoolToVis}}">
+                            <TextBlock Style="{StaticResource Hint}" FontSize="13"
+                                       Text="This command has no source or destination. Configure it on the Options tab (and Authentication &amp; environment when logging in), then click Run." />
+                        </Border>
+
+                        <!-- Extra args -->
+                        <Border Style="{StaticResource Card}">
+                            <StackPanel>
+                                <TextBlock Text="Additional arguments" Style="{StaticResource SectionHeader}" />
+                                <TextBox Text="{Binding ExtraArguments, UpdateSourceTrigger=PropertyChanged}" Style="{StaticResource MonoTextBox}" />
+                                <TextBlock Style="{StaticResource Hint}"
+                                           Text="Anything typed here is appended verbatim, e.g. flags of a newer azcopy release. Use double quotes for values with spaces." />
+                            </StackPanel>
+                        </Border>
+                    </StackPanel>
+                </ScrollViewer>
+            </TabItem>
+
+            <!-- 1: Options -->
+            <TabItem Header="Options">
+                <DockPanel>
+                    <Border DockPanel.Dock="Top" Style="{StaticResource Card}" Padding="12,8">
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="320" />
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Text="Search" VerticalAlignment="Center" Margin="0,0,8,0" FontWeight="SemiBold" />
+                            <TextBox Grid.Column="1" Text="{Binding OptionSearch, UpdateSourceTrigger=PropertyChanged}" ToolTip="Filter by name, description or category" />
+                            <CheckBox Grid.Column="2" Content="Only show options that are set" IsChecked="{Binding ShowOnlySetOptions}" Margin="16,0" />
+                            <TextBlock Grid.Column="3" Text="{Binding OptionCountText}" VerticalAlignment="Center" Foreground="{StaticResource SecondaryTextBrush}"
+                                       TextTrimming="CharacterEllipsis" />
+                            <Button Grid.Column="4" Content="Reset all" Command="{Binding ResetOptionsCommand}" />
+                        </Grid>
+                    </Border>
+                    <Border Style="{StaticResource Card}" Padding="12,0,4,8" Margin="0">
+                        <ScrollViewer VerticalScrollBarVisibility="Auto">
+                            <ItemsControl ItemsSource="{Binding OptionsView}" ItemTemplate="{StaticResource OptionRow}" Margin="0,0,10,0">
+                                <ItemsControl.GroupStyle>
+                                    <StaticResource ResourceKey="CategoryGroupStyle" />
+                                </ItemsControl.GroupStyle>
+                            </ItemsControl>
+                        </ScrollViewer>
+                    </Border>
+                </DockPanel>
+            </TabItem>
+
+            <!-- 2: Environment -->
+            <TabItem Header="Authentication &amp; environment">
+                <DockPanel>
+                    <Border DockPanel.Dock="Top" Style="{StaticResource Card}" Padding="12,10">
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <StackPanel>
+                                <TextBlock Style="{StaticResource Hint}" FontSize="12.5" Margin="0">
+                                    <Run Text="These environment variables are passed only to the azcopy process started by CopyPilot." />
+                                    <LineBreak />
+                                    <Run Text="Azure: use SAS tokens, run the 'Login' command, or set AZCOPY_AUTO_LOGIN_TYPE. S3: AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY. GCS: GOOGLE_APPLICATION_CREDENTIALS." />
+                                    <LineBreak />
+                                    <Run Text="Secrets are masked in the preview and are not stored in the last session." />
+                                </TextBlock>
+                                <TextBlock Text="{Binding EnvironmentCountText}" Margin="0,6,0,0" FontWeight="SemiBold" />
+                            </StackPanel>
+                            <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                                <Button Content="Login status" Margin="0,0,6,0" Command="{Binding QuickCommand}" CommandParameter="login status" />
+                                <Button Content="Logout" Margin="0,0,6,0" Command="{Binding QuickCommand}" CommandParameter="logout" />
+                                <Button Content="Reset all" Command="{Binding ResetEnvironmentCommand}" />
+                            </StackPanel>
+                        </Grid>
+                    </Border>
+                    <Border Style="{StaticResource Card}" Padding="12,0,4,8" Margin="0">
+                        <ScrollViewer VerticalScrollBarVisibility="Auto">
+                            <ItemsControl ItemsSource="{Binding EnvironmentView}" ItemTemplate="{StaticResource OptionRow}" Margin="0,0,10,0">
+                                <ItemsControl.GroupStyle>
+                                    <StaticResource ResourceKey="CategoryGroupStyle" />
+                                </ItemsControl.GroupStyle>
+                            </ItemsControl>
+                        </ScrollViewer>
+                    </Border>
+                </DockPanel>
+            </TabItem>
+
+            <!-- 3: Settings -->
+            <TabItem Header="AzCopy &amp; tools">
+                <ScrollViewer VerticalScrollBarVisibility="Auto">
+                    <StackPanel Margin="0,0,6,0">
+                        <Border Style="{StaticResource Card}">
+                            <StackPanel>
+                                <TextBlock Text="AzCopy engine" Style="{StaticResource SectionHeader}" />
+                                <TextBlock Style="{StaticResource Hint}" FontSize="12.5" Margin="0"
+                                           Text="CopyPilot ships with a recent AzCopy v10. You can download the newest release from Microsoft at any time, or point to your own azcopy.exe." />
+                                <TextBlock Text="In use" Style="{StaticResource FieldLabel}" />
+                                <TextBox Text="{Binding ResolvedAzCopyPath, Mode=OneWay}" IsReadOnly="True" Style="{StaticResource MonoTextBox}" Background="{StaticResource WindowBrush}" />
+                                <TextBlock Style="{StaticResource Hint}">
+                                    <Run Text="Version:" />
+                                    <Run Text="{Binding AzCopyVersion, Mode=OneWay}" FontWeight="SemiBold" />
+                                </TextBlock>
+                                <TextBlock Text="Custom azcopy.exe (optional)" Style="{StaticResource FieldLabel}" />
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBox Text="{Binding AzCopyPathOverride, UpdateSourceTrigger=LostFocus}" Style="{StaticResource MonoTextBox}" />
+                                    <Button Grid.Column="1" Content="Browse…" Margin="6,0,0,0" Command="{Binding BrowseAzCopyCommand}" />
+                                    <Button Grid.Column="2" Content="Use bundled" Margin="6,0,0,0" Command="{Binding ResetAzCopyCommand}" />
+                                </Grid>
+                                <StackPanel Orientation="Horizontal" Margin="0,12,0,0">
+                                    <Button Content="Download latest AzCopy" Style="{StaticResource AccentButton}" Command="{Binding UpdateAzCopyCommand}" />
+                                </StackPanel>
+                            </StackPanel>
+                        </Border>
+
+                        <Border Style="{StaticResource Card}">
+                            <StackPanel>
+                                <TextBlock Text="Quick tools" Style="{StaticResource SectionHeader}" />
+                                <WrapPanel>
+                                    <Button Content="Jobs: list" Margin="0,0,6,6" Command="{Binding QuickCommand}" CommandParameter="jobs list" />
+                                    <Button Content="Login status" Margin="0,0,6,6" Command="{Binding QuickCommand}" CommandParameter="login status" />
+                                    <Button Content="Show azcopy environment" Margin="0,0,6,6" Command="{Binding QuickCommand}" CommandParameter="env" />
+                                    <Button Content="Open azcopy log &amp; plan folder" Margin="0,0,6,6" Command="{Binding OpenLogFolderCommand}" />
+                                </WrapPanel>
+                                <TextBlock Style="{StaticResource Hint}"
+                                           Text="For resume, show, remove or clean with options, pick the 'Jobs: …' command on the Transfer tab." />
+                            </StackPanel>
+                        </Border>
+                    </StackPanel>
+                </ScrollViewer>
+            </TabItem>
+
+            <!-- 4: Output -->
+            <TabItem Header="Output">
+                <DockPanel>
+                    <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" Margin="0,0,0,8">
+                        <Button Content="Clear" Margin="0,0,6,0" Command="{Binding ClearLogCommand}" />
+                        <Button Content="Copy all" Margin="0,0,6,0" Command="{Binding CopyLogCommand}" />
+                        <Button Content="Save…" Margin="0,0,6,0" Command="{Binding SaveLogCommand}" />
+                        <Button Content="Open azcopy log folder" Margin="0,0,16,0" Command="{Binding OpenLogFolderCommand}" />
+                        <TextBlock VerticalAlignment="Center" Foreground="{StaticResource SecondaryTextBrush}">
+                            <Run Text="Job id:" />
+                            <Run Text="{Binding RunningJobId, Mode=OneWay}" FontFamily="{StaticResource MonoFont}" FontWeight="SemiBold" />
+                        </TextBlock>
+                    </StackPanel>
+                    <Grid DockPanel.Dock="Bottom" Margin="0,8,0,0">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <TextBlock Text="Answer a prompt" VerticalAlignment="Center" Margin="0,0,8,0" FontWeight="SemiBold" />
+                        <TextBox Grid.Column="1" Text="{Binding InputText, UpdateSourceTrigger=PropertyChanged}" Style="{StaticResource MonoTextBox}"
+                                 ToolTip="Used when azcopy asks a question, e.g. with --overwrite=prompt (answer y / n / a / l).">
+                            <TextBox.InputBindings>
+                                <KeyBinding Key="Enter" Command="{Binding SendInputCommand}" />
+                            </TextBox.InputBindings>
+                        </TextBox>
+                        <Button Grid.Column="2" Content="Send" Margin="6,0,0,0" Command="{Binding SendInputCommand}" />
+                    </Grid>
+                    <Border Background="{StaticResource ConsoleBrush}" CornerRadius="8" Padding="10,8">
+                        <ListBox x:Name="LogList" ItemsSource="{Binding Log}" Background="Transparent" BorderThickness="0"
+                                 FontFamily="{StaticResource MonoFont}" FontSize="12.5"
+                                 VirtualizingPanel.IsVirtualizing="True" VirtualizingPanel.VirtualizationMode="Recycling"
+                                 ScrollViewer.HorizontalScrollBarVisibility="Auto" SelectionMode="Extended">
+                            <ListBox.ItemContainerStyle>
+                                <Style TargetType="ListBoxItem">
+                                    <Setter Property="Padding" Value="0" />
+                                    <Setter Property="Margin" Value="0" />
+                                </Style>
+                            </ListBox.ItemContainerStyle>
+                            <ListBox.ItemTemplate>
+                                <DataTemplate DataType="{x:Type vm:LogLine}">
+                                    <TextBlock Text="{Binding Text}" Foreground="{Binding Kind, Converter={StaticResource LogKindToBrush}}" />
+                                </DataTemplate>
+                            </ListBox.ItemTemplate>
+                        </ListBox>
+                    </Border>
+                </DockPanel>
+            </TabItem>
+
+            <!-- 5: About -->
+            <TabItem Header="About">
+                <ScrollViewer VerticalScrollBarVisibility="Auto">
+                    <Border Style="{StaticResource Card}" Padding="32" HorizontalAlignment="Center" MaxWidth="760" Margin="0,12,0,12">
+                        <StackPanel>
+                            <StackPanel Orientation="Horizontal">
+                                <Image Source="Assets/copypilot.png" Width="96" Height="96" RenderOptions.BitmapScalingMode="HighQuality" />
+                                <StackPanel Margin="20,0,0,0" VerticalAlignment="Center">
+                                    <TextBlock Text="CopyPilot" FontSize="34" FontWeight="Bold" Foreground="{StaticResource AccentDarkBrush}" />
+                                    <TextBlock FontSize="14" Foreground="{StaticResource SecondaryTextBrush}">
+                                        <Run Text="Version" />
+                                        <Run Text="{Binding AppVersion, Mode=OneWay}" />
+                                    </TextBlock>
+                                </StackPanel>
+                            </StackPanel>
+
+                            <Border Background="{StaticResource AccentLightBrush}" CornerRadius="8" Padding="20,16" Margin="0,24,0,0">
+                                <StackPanel>
+                                    <TextBlock Text="Created by" FontSize="13" Foreground="{StaticResource SecondaryTextBrush}" />
+                                    <TextBlock Text="{Binding AuthorName}" FontSize="28" FontWeight="SemiBold" Foreground="{StaticResource AccentDarkBrush}" />
+                                    <TextBlock Text="Idea, design and development" FontSize="12.5" Foreground="{StaticResource SecondaryTextBrush}" />
+                                </StackPanel>
+                            </Border>
+
+                            <TextBlock Margin="0,20,0,0" TextWrapping="Wrap" FontSize="13" LineHeight="20">
+                                CopyPilot is a Windows front-end for Microsoft AzCopy. It lets you copy and synchronise files and folders between
+                                local disks, network shares, Azure Blob Storage, Azure Data Lake Storage Gen2, Azure Files, Amazon S3 and
+                                Google Cloud Storage — with every AzCopy option available from a friendly interface.
+                            </TextBlock>
+
+                            <TextBlock Text="Credits" Style="{StaticResource FieldLabel}" Margin="0,20,0,4" />
+                            <TextBlock TextWrapping="Wrap" Style="{StaticResource Hint}" FontSize="12.5">
+                                <Run Text="Powered by Microsoft AzCopy" />
+                                <Run Text="{Binding AzCopyVersion, Mode=OneWay}" FontWeight="SemiBold" />
+                                <Run Text="— © Microsoft Corporation, MIT License." />
+                            </TextBlock>
+                            <WrapPanel Margin="0,10,0,0">
+                                <Button Style="{StaticResource LinkButton}" Content="AzCopy documentation" Margin="0,0,16,0"
+                                        Command="{Binding OpenUrlCommand}" CommandParameter="https://learn.microsoft.com/azure/storage/common/storage-use-azcopy-v10" />
+                                <Button Style="{StaticResource LinkButton}" Content="AzCopy on GitHub" Margin="0,0,16,0"
+                                        Command="{Binding OpenUrlCommand}" CommandParameter="https://github.com/Azure/azure-storage-azcopy" />
+                                <Button Style="{StaticResource LinkButton}" Content="AzCopy release notes"
+                                        Command="{Binding OpenUrlCommand}" CommandParameter="https://github.com/Azure/azure-storage-azcopy/releases" />
+                            </WrapPanel>
+
+                            <TextBlock Text="{Binding CopyrightText}" Margin="0,24,0,0" Foreground="{StaticResource SecondaryTextBrush}" />
+                        </StackPanel>
+                    </Border>
+                </ScrollViewer>
+            </TabItem>
+        </TabControl>
+    </DockPanel>
+</Window>

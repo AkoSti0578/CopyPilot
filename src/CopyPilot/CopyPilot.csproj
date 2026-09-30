@@ -1,0 +1,32 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <!-- Allows building (not running) on Linux/macOS, e.g. for CI checks. -->
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <AssemblyName>CopyPilot</AssemblyName>
+    <RootNamespace>CopyPilot</RootNamespace>
+    <ApplicationIcon>Assets\copypilot.ico</ApplicationIcon>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <Description>CopyPilot – a graphical front-end for Microsoft AzCopy. Created by Arnold Kolkman.</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\CopyPilot.Core\CopyPilot.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Resource Include="Assets\copypilot.ico" />
+    <Resource Include="Assets\copypilot.png" />
+  </ItemGroup>
+
+  <!-- The bundled azcopy (downloaded by build.ps1 into build\azcopy) is shipped next to CopyPilot.exe. -->
+  <ItemGroup Condition="Exists('..\..\build\azcopy')">
+    <None Include="..\..\build\azcopy\**\*" Link="azcopy\%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" ExcludeFromSingleFile="true" />
+  </ItemGroup>
+
+</Project>

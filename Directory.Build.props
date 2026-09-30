@@ -1,0 +1,10 @@
+<Project>
+  <PropertyGroup>
+    <Version>1.0.0</Version>
+    <Authors>Arnold Kolkman</Authors>
+    <Company>Arnold Kolkman</Company>
+    <Product>CopyPilot</Product>
+    <Copyright>Copyright © 2026 Arnold Kolkman</Copyright>
+    <LangVersion>latest</LangVersion>
+  </PropertyGroup>
+</Project>

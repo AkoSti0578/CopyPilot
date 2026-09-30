@@ -1,0 +1,20 @@
+<Project Sdk="WixToolset.Sdk/5.0.2">
+
+  <!--
+    Builds the CopyPilot MSI. Run build.ps1 from the repository root, or:
+      dotnet build installer\CopyPilot.Installer.wixproj -c Release -p:AppPublishDir=<publish folder> -p:Version=1.2.3
+  -->
+  <PropertyGroup>
+    <OutputType>Package</OutputType>
+    <InstallerPlatform>x64</InstallerPlatform>
+    <OutputName>CopyPilot-$(Version)-x64</OutputName>
+    <AppPublishDir Condition="'$(AppPublishDir)' == ''">$(MSBuildThisFileDirectory)..\artifacts\publish\win-x64</AppPublishDir>
+    <DefineConstants>ProductVersion=$(Version);PublishDir=$(AppPublishDir)</DefineConstants>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="WixToolset.UI.wixext" Version="5.0.2" />
+    <PackageReference Include="WixToolset.Util.wixext" Version="5.0.2" />
+  </ItemGroup>
+
+</Project>

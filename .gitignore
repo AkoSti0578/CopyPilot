@@ -1,0 +1,9 @@
+bin/
+obj/
+.vs/
+*.user
+artifacts/
+build/azcopy/
+build/download/
+*.msi
+*.wixpdb

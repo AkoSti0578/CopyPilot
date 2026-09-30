@@ -1,0 +1,82 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  CopyPilot installer – created by Arnold Kolkman.
+  Installs CopyPilot (self-contained, no .NET runtime needed) together with the bundled AzCopy.
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
+
+  <Package Name="CopyPilot"
+           Manufacturer="Arnold Kolkman"
+           Version="$(var.ProductVersion)"
+           UpgradeCode="bafc68c5-42bf-4ee4-8165-71be99db738a"
+           Scope="perMachine"
+           Compressed="yes">
+
+    <SummaryInformation Description="CopyPilot – graphical front-end for Microsoft AzCopy, by Arnold Kolkman" />
+
+    <MajorUpgrade DowngradeErrorMessage="A newer version of [ProductName] is already installed." />
+    <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+
+    <Icon Id="CopyPilotIcon" SourceFile="..\src\CopyPilot\Assets\copypilot.ico" />
+    <Property Id="ARPPRODUCTICON" Value="CopyPilotIcon" />
+    <Property Id="ARPCONTACT" Value="Arnold Kolkman" />
+    <Property Id="ARPCOMMENTS" Value="Graphical front-end for Microsoft AzCopy. Created by Arnold Kolkman." />
+
+    <!-- UI: welcome, license, install folder, progress, finish (with "Launch CopyPilot") -->
+    <WixVariable Id="WixUILicenseRtf" Value="License.rtf" />
+    <WixVariable Id="WixUIBannerBmp" Value="Banner.bmp" />
+    <WixVariable Id="WixUIDialogBmp" Value="Dialog.bmp" />
+    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT" Value="Launch CopyPilot" />
+    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOX" Value="1" />
+    <Property Id="WixShellExecTarget" Value="[#CopyPilotExe]" />
+    <CustomAction Id="LaunchApplication" BinaryRef="Wix4UtilCA_$(sys.BUILDARCHSHORT)" DllEntry="WixShellExec" Impersonate="yes" />
+    <UI>
+      <ui:WixUI Id="WixUI_InstallDir" InstallDirectory="INSTALLFOLDER" />
+      <Publish Dialog="ExitDialog" Control="Finish" Event="DoAction" Value="LaunchApplication"
+               Condition="WIXUI_EXITDIALOGOPTIONALCHECKBOX = 1 and NOT Installed" />
+    </UI>
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="CopyPilot" />
+    </StandardDirectory>
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Directory Id="ProgramMenuDir" Name="CopyPilot" />
+    </StandardDirectory>
+    <StandardDirectory Id="DesktopFolder" />
+
+    <Feature Id="Main" Title="CopyPilot" Description="CopyPilot and the bundled AzCopy engine." Level="1"
+             ConfigurableDirectory="INSTALLFOLDER" AllowAbsent="no">
+      <ComponentRef Id="MainExecutable" />
+      <ComponentGroupRef Id="AppFiles" />
+    </Feature>
+    <Feature Id="Desktop" Title="Desktop shortcut" Level="1">
+      <ComponentRef Id="DesktopShortcut" />
+    </Feature>
+  </Package>
+
+  <Fragment>
+    <Component Id="MainExecutable" Directory="INSTALLFOLDER">
+      <File Id="CopyPilotExe" Source="$(var.PublishDir)\CopyPilot.exe" KeyPath="yes">
+        <Shortcut Id="StartMenuShortcut" Directory="ProgramMenuDir" Name="CopyPilot"
+                  Description="Copy files anywhere with AzCopy – by Arnold Kolkman"
+                  WorkingDirectory="INSTALLFOLDER" Icon="CopyPilotIcon" Advertise="yes" />
+      </File>
+      <RemoveFolder Id="RemoveProgramMenuDir" Directory="ProgramMenuDir" On="uninstall" />
+    </Component>
+
+    <Component Id="DesktopShortcut" Directory="DesktopFolder" Guid="7d0f7a3e-3c59-4d0e-9a55-2f5d8f3b6c21">
+      <Shortcut Id="DesktopShortcutLink" Name="CopyPilot" Description="Copy files anywhere with AzCopy – by Arnold Kolkman"
+                Target="[#CopyPilotExe]" WorkingDirectory="INSTALLFOLDER" Icon="CopyPilotIcon" />
+      <RegistryValue Root="HKLM" Key="Software\Arnold Kolkman\CopyPilot" Name="DesktopShortcut" Type="integer" Value="1" KeyPath="yes" />
+    </Component>
+
+    <!-- Everything else from the publish folder, including azcopy\azcopy.exe. -->
+    <ComponentGroup Id="AppFiles" Directory="INSTALLFOLDER">
+      <Files Include="$(var.PublishDir)\**">
+        <Exclude Files="$(var.PublishDir)\CopyPilot.exe" />
+        <Exclude Files="$(var.PublishDir)\**\*.pdb" />
+      </Files>
+    </ComponentGroup>
+  </Fragment>
+</Wix>

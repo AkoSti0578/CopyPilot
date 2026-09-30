@@ -1,0 +1,90 @@
+<UserControl x:Class="CopyPilot.Views.LocationEditor"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             xmlns:vm="clr-namespace:CopyPilot.ViewModels"
+             xmlns:v="clr-namespace:CopyPilot.Views"
+             mc:Ignorable="d"
+             d:DataContext="{d:DesignInstance Type=vm:LocationViewModel}"
+             d:DesignWidth="450">
+    <Border Style="{StaticResource Card}" Margin="0">
+        <StackPanel>
+            <TextBlock Text="{Binding Header}" Style="{StaticResource SectionHeader}" />
+
+            <TextBlock Text="Type" Style="{StaticResource FieldLabel}" Margin="0,0,0,4" />
+            <ComboBox ItemsSource="{x:Static vm:LocationViewModel.Kinds}" SelectedItem="{Binding SelectedKind}" />
+
+            <!-- Local path or pipe file -->
+            <StackPanel Visibility="{Binding UsesLocalPath, Converter={StaticResource BoolToVis}}">
+                <TextBlock Text="{Binding LocalPathLabel}" Style="{StaticResource FieldLabel}" />
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <TextBox Text="{Binding LocalPath, UpdateSourceTrigger=PropertyChanged}" />
+                    <Button Grid.Column="1" Content="File…" Margin="6,0,0,0" Command="{Binding BrowseFileCommand}" />
+                    <Button Grid.Column="2" Content="Folder…" Margin="6,0,0,0" Command="{Binding BrowseFolderCommand}"
+                            Visibility="{Binding IsLocal, Converter={StaticResource BoolToVis}}" />
+                </Grid>
+            </StackPanel>
+
+            <!-- Azure account -->
+            <Grid Visibility="{Binding IsAzure, Converter={StaticResource BoolToVis}}">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="10" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+                <StackPanel>
+                    <TextBlock Text="Storage account" Style="{StaticResource FieldLabel}" />
+                    <TextBox Text="{Binding Account, UpdateSourceTrigger=PropertyChanged}" ToolTip="The storage account name, e.g. mystorageaccount" />
+                </StackPanel>
+                <StackPanel Grid.Column="2">
+                    <TextBlock Text="Cloud / endpoint suffix" Style="{StaticResource FieldLabel}" />
+                    <ComboBox IsEditable="True" ItemsSource="{x:Static vm:LocationViewModel.EndpointSuffixes}"
+                              Text="{Binding EndpointSuffix, UpdateSourceTrigger=PropertyChanged}"
+                              ToolTip="core.windows.net (public), core.chinacloudapi.cn (China), core.usgovcloudapi.net (US Gov) or a custom suffix" />
+                </StackPanel>
+            </Grid>
+
+            <!-- S3 region -->
+            <StackPanel Visibility="{Binding IsS3, Converter={StaticResource BoolToVis}}">
+                <TextBlock Text="Region (optional)" Style="{StaticResource FieldLabel}" />
+                <TextBox Text="{Binding Region, UpdateSourceTrigger=PropertyChanged}" ToolTip="e.g. eu-west-1. Empty uses the global s3.amazonaws.com endpoint." />
+            </StackPanel>
+
+            <!-- Container / bucket and path -->
+            <StackPanel Visibility="{Binding HasContainer, Converter={StaticResource BoolToVis}}">
+                <TextBlock Text="{Binding ContainerLabel}" Style="{StaticResource FieldLabel}" />
+                <TextBox Text="{Binding Container, UpdateSourceTrigger=PropertyChanged}" />
+                <TextBlock Text="{Binding ContainerHint}" Style="{StaticResource Hint}" />
+                <TextBlock Text="Path inside (optional, wildcards * allowed)" Style="{StaticResource FieldLabel}" />
+                <TextBox Text="{Binding Path, UpdateSourceTrigger=PropertyChanged}" ToolTip="e.g. folder/sub/*.csv or folder/file.txt" />
+            </StackPanel>
+
+            <!-- SAS -->
+            <StackPanel Visibility="{Binding IsAzure, Converter={StaticResource BoolToVis}}">
+                <TextBlock Text="SAS token (optional)" Style="{StaticResource FieldLabel}" />
+                <PasswordBox v:PasswordBoxAssistant.BoundPassword="{Binding Sas, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                             ToolTip="Shared access signature, e.g. sv=2024-...&amp;sig=... (with or without leading ?)" />
+            </StackPanel>
+
+            <!-- Custom URL -->
+            <StackPanel Visibility="{Binding IsCustomUrl, Converter={StaticResource BoolToVis}}">
+                <TextBlock Text="URL" Style="{StaticResource FieldLabel}" />
+                <TextBox Text="{Binding Url, UpdateSourceTrigger=PropertyChanged}" Style="{StaticResource MonoTextBox}" TextWrapping="Wrap"
+                         ToolTip="Any URL azcopy understands, e.g. https://account.blob.core.windows.net/container/path?sv=...&amp;sig=..." />
+            </StackPanel>
+
+            <TextBlock Text="{Binding AuthHint}" Style="{StaticResource Hint}" Margin="0,10,0,0"
+                       Visibility="{Binding AuthHint, Converter={StaticResource EmptyToCollapsed}}" />
+
+            <TextBlock Text="azcopy receives" Style="{StaticResource FieldLabel}" />
+            <TextBox Text="{Binding Preview, Mode=OneWay}" IsReadOnly="True" Style="{StaticResource MonoTextBox}"
+                     Background="{StaticResource WindowBrush}" TextWrapping="Wrap" />
+        </StackPanel>
+    </Border>
+</UserControl>
