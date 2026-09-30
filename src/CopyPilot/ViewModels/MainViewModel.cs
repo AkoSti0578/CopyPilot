@@ -43,6 +43,7 @@ public sealed class MainViewModel : ObservableObject
 
     private readonly AppSettings _settings;
     private readonly AzCopyRunner _runner = new();
+    private readonly TransferRunner _transferRunner;
     private readonly ConcurrentQueue<OutputLine> _pending = new();
     private readonly DispatcherTimer _flushTimer;
 
@@ -70,6 +71,7 @@ public sealed class MainViewModel : ObservableObject
     public MainViewModel()
     {
         _settings = AppSettings.Load();
+        _transferRunner = new TransferRunner(_runner) { KnownHostsFile = Path.Combine(AppSettings.Folder, "known_hosts") };
         _selectedCommand = CommandCatalog.Get(CommandCatalog.Copy);
 
         Source = new LocationViewModel("Source", new LocationSpec { Kind = LocationKind.Local }, isDestination: false);
@@ -253,7 +255,7 @@ public sealed class MainViewModel : ObservableObject
         ExtraArguments = ExtraArguments,
     };
 
-    private CommandPlan BuildPlan() => CommandBuilder.Build(BuildRequest());
+    private ExecutionPlan BuildPlan() => TransferPlanner.Plan(BuildRequest());
 
     private Dictionary<string, string> BuildEnvironment() =>
         EnvironmentVariables.Where(e => e.IsSet).ToDictionary(e => e.Name, e => e.Value.Trim());
@@ -273,7 +275,10 @@ public sealed class MainViewModel : ObservableObject
         sb.Append(plan.ToDisplayString(AzCopyDisplayName));
         CommandPreview = sb.ToString();
         IsValid = plan.IsValid;
-        ValidationText = plan.IsValid ? "✔ Command is ready to run." : "⚠ " + string.Join("  ", plan.Errors);
+        ValidationText = !plan.IsValid ? "⚠ " + string.Join("  ", plan.Errors)
+            : plan.Warnings.Count > 0 ? "✔ Ready to run.  ⓘ " + string.Join("  ", plan.Warnings)
+            : plan.IsSftp ? "✔ Ready to run (SFTP is handled by CopyPilot" + (plan.NeedsAzCopy ? " together with azcopy)." : ").")
+            : "✔ Command is ready to run.";
         OnPropertyChanged(nameof(OptionCountText));
         OnPropertyChanged(nameof(EnvironmentCountText));
     }
@@ -368,7 +373,7 @@ public sealed class MainViewModel : ObservableObject
         }
 
         var exe = AzCopyLocator.Find(_settings.AzCopyPath);
-        if (exe == null)
+        if (exe == null && plan.NeedsAzCopy)
         {
             MessageBox.Show("azcopy.exe was not found.\n\nOpen the Settings tab and click 'Download latest azcopy', or browse to an existing azcopy.exe.",
                 "CopyPilot", MessageBoxButton.OK, MessageBoxImage.Error);
@@ -378,7 +383,7 @@ public sealed class MainViewModel : ObservableObject
         await RunPlanAsync(exe, plan);
     }
 
-    private async Task RunPlanAsync(string exe, CommandPlan plan)
+    private async Task RunPlanAsync(string? exe, ExecutionPlan plan)
     {
         IsRunning = true;
         _cts = new CancellationTokenSource();
@@ -386,14 +391,19 @@ public sealed class MainViewModel : ObservableObject
         IsIndeterminate = true;
         CountsText = "";
         RunningJobId = "";
-        StatusText = $"Running '{string.Join(' ', plan.Arguments.Take(SelectedCommand.Verbs.Count))}' …";
+        StatusText = $"Running '{plan.Request.Command.Title}'" + (plan.IsSftp ? " (SFTP)" : "") + " …";
         SelectedTabIndex = TabLog;
-        AddLog(new LogLine("> " + plan.ToDisplayString(exe), LogKind.Command));
+        foreach (var line in plan.ToDisplayString(exe ?? "azcopy").Split('\n'))
+            AddLog(new LogLine("> " + line.TrimEnd('\r'), LogKind.Command));
+        foreach (var warning in plan.Warnings) AddLog(new LogLine("WARNING: " + warning, LogKind.Warning));
 
         var sw = Stopwatch.StartNew();
         try
         {
-            var code = await _runner.RunAsync(exe, plan, BuildEnvironment(), OnOutput, _cts.Token);
+            // Run on the thread pool so SFTP work never blocks the UI thread.
+            var env = BuildEnvironment();
+            var token = _cts.Token;
+            var code = await Task.Run(() => _transferRunner.RunAsync(plan, exe, env, OnOutput, token), token);
             FlushOutput();
             if (code == 0)
             {
@@ -403,7 +413,8 @@ public sealed class MainViewModel : ObservableObject
             }
             else
             {
-                StatusText = $"azcopy exited with code {code} after {sw.Elapsed:hh\\:mm\\:ss}. See the output above and the azcopy log file.";
+                StatusText = (plan.IsSftp ? $"The transfer finished with errors (code {code})" : $"azcopy exited with code {code}")
+                             + $" after {sw.Elapsed:hh\\:mm\\:ss}. See the output above" + (plan.NeedsAzCopy ? " and the azcopy log file." : ".");
                 AddLog(new LogLine(StatusText, LogKind.Error));
             }
         }
@@ -418,7 +429,7 @@ public sealed class MainViewModel : ObservableObject
         catch (Exception ex)
         {
             FlushOutput();
-            StatusText = "Failed to run azcopy: " + ex.Message;
+            StatusText = (plan.IsSftp ? "Transfer failed: " : "Failed to run azcopy: ") + ex.Message;
             AddLog(new LogLine(StatusText, LogKind.Error));
         }
         finally
@@ -499,7 +510,7 @@ public sealed class MainViewModel : ObservableObject
             return;
         }
 
-        var plan = CommandBuilder.Build(new CommandRequest { Command = CommandCatalog.Get(commandId) });
+        var plan = TransferPlanner.Plan(new CommandRequest { Command = CommandCatalog.Get(commandId) });
         await RunPlanAsync(exe, plan);
     }
 
@@ -628,6 +639,13 @@ public sealed class MainViewModel : ObservableObject
     private void SaveScript()
     {
         var plan = BuildPlan();
+        if (plan.AzCopy is not { } azPlan)
+        {
+            MessageBox.Show("Transfers that involve SFTP are carried out by CopyPilot itself and cannot be exported as an azcopy script.\n\nSave a profile instead (Save profile…).",
+                "CopyPilot", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+
         var dlg = new SaveFileDialog
         {
             Title = "Export as script",
@@ -639,8 +657,8 @@ public sealed class MainViewModel : ObservableObject
         var exe = ResolvedOrDefaultExe;
         var env = BuildEnvironment();
         var script = dlg.FileName.EndsWith(".cmd", StringComparison.OrdinalIgnoreCase)
-            ? ScriptExporter.ToCmd(exe, plan, env)
-            : ScriptExporter.ToPowerShell(exe, plan, env);
+            ? ScriptExporter.ToCmd(exe, azPlan, env)
+            : ScriptExporter.ToPowerShell(exe, azPlan, env);
         File.WriteAllText(dlg.FileName, script, new UTF8Encoding(encoderShouldEmitUTF8Identifier: true));
         StatusText = "Script saved to " + dlg.FileName + " (contains secrets if any were entered).";
     }

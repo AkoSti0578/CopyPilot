@@ -24,6 +24,7 @@ public enum OptionKind
 /// <param name="Default">azcopy's default value (informational only).</param>
 /// <param name="Choices">Suggested values for <see cref="OptionKind.Choice"/>.</param>
 /// <param name="Sensitive">Value is a secret: masked in previews and never saved to profiles.</param>
+/// <param name="CopyPilotOnly">A CopyPilot setting (e.g. for SFTP) that is never passed to azcopy.</param>
 public sealed record OptionDefinition(
     string Name,
     OptionKind Kind,
@@ -32,10 +33,11 @@ public sealed record OptionDefinition(
     IReadOnlyList<string> Commands,
     string? Default = null,
     IReadOnlyList<string>? Choices = null,
-    bool Sensitive = false)
+    bool Sensitive = false,
+    bool CopyPilotOnly = false)
 {
     public bool AppliesTo(string commandId) =>
         Commands.Contains("*") || Commands.Contains(commandId, StringComparer.OrdinalIgnoreCase);
 
-    public string CommandLineName => "--" + Name;
+    public string CommandLineName => CopyPilotOnly ? Name : "--" + Name;
 }

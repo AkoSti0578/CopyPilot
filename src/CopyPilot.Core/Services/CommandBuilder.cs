@@ -80,6 +80,12 @@ public static class CommandBuilder
                     break;
                 }
 
+                if (target.Kind == LocationKind.Sftp)
+                {
+                    plan.Errors.Add("SFTP is supported by 'Copy' and 'Sync' only.");
+                    break;
+                }
+
                 plan.Errors.AddRange(target.Validate(cmd.TargetLabel));
                 if (target.Build() is { Length: > 0 } t) plan.Arguments.Add(t);
                 break;
@@ -97,7 +103,7 @@ public static class CommandBuilder
             .ToDictionary(o => o.Name, StringComparer.OrdinalIgnoreCase);
         foreach (var def in OptionCatalog.Options.Where(o => o.AppliesTo(cmd.Id)))
         {
-            if (!options.TryGetValue(def.Name, out var value)) continue;
+            if (def.CopyPilotOnly || !options.TryGetValue(def.Name, out var value)) continue;
             AddOption(plan, def, value);
         }
 
@@ -122,6 +128,13 @@ public static class CommandBuilder
 
         plan.Errors.AddRange(src.Validate("Source"));
         plan.Errors.AddRange(dst.Validate("Destination"));
+
+        if (src.IsSftp || dst.IsSftp)
+        {
+            // SFTP transfers are planned by TransferPlanner; azcopy never sees an SFTP location.
+            plan.Errors.Add("SFTP locations must be planned with TransferPlanner.");
+            return;
+        }
 
         var srcPipe = src.Kind == LocationKind.Pipe;
         var dstPipe = dst.Kind == LocationKind.Pipe;

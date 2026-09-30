@@ -43,6 +43,8 @@ public sealed class Profile
         {
             var c = l.Clone();
             c.Sas = "";
+            c.Password = "";
+            c.PrivateKeyPassphrase = "";
             c.Url = StripQuery(c.Url);
             return c;
         }

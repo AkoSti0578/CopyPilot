@@ -13,6 +13,8 @@ public enum LocationKind
     CustomUrl,
     /// <summary>Stream through stdin/stdout. CopyPilot connects the pipe to a local file.</summary>
     Pipe,
+    /// <summary>SFTP server (SSH). Handled by CopyPilot itself, as azcopy does not support SFTP.</summary>
+    Sftp,
 }
 
 /// <summary>A source or destination, described by its parts. <see cref="Build"/> turns it into what azcopy expects.</summary>
@@ -44,6 +46,30 @@ public sealed class LocationSpec
     /// <summary>Full URL for <see cref="LocationKind.CustomUrl"/>.</summary>
     public string Url { get; set; } = "";
 
+    /// <summary>SFTP host name or IP address.</summary>
+    public string Host { get; set; } = "";
+
+    /// <summary>SFTP port.</summary>
+    public int Port { get; set; } = 22;
+
+    /// <summary>SFTP user name.</summary>
+    public string Username { get; set; } = "";
+
+    /// <summary>SFTP password (secret). Also used for keyboard-interactive authentication.</summary>
+    public string Password { get; set; } = "";
+
+    /// <summary>Path to an OpenSSH / PuTTY private key file for SFTP.</summary>
+    public string PrivateKeyPath { get; set; } = "";
+
+    /// <summary>Passphrase of the private key (secret).</summary>
+    public string PrivateKeyPassphrase { get; set; } = "";
+
+    /// <summary>
+    /// Expected SHA256 host key fingerprint ("SHA256:..."). Empty = trust on first use
+    /// and remember the key in CopyPilot's known_hosts file.
+    /// </summary>
+    public string HostKeyFingerprint { get; set; } = "";
+
     public static IReadOnlyList<string> AzureEndpointSuffixes { get; } =
     [
         "core.windows.net",
@@ -52,6 +78,11 @@ public sealed class LocationSpec
     ];
 
     public bool IsRemote => Kind is not (LocationKind.Local or LocationKind.Pipe);
+
+    public bool IsSftp => Kind == LocationKind.Sftp;
+
+    /// <summary>The SFTP path, "." (home directory) when empty.</summary>
+    public string SftpPath => string.IsNullOrWhiteSpace(Path) ? "." : Path.Trim().Replace('\\', '/');
 
     /// <summary>The service name azcopy uses in --from-to values.</summary>
     public string? FromToName => Kind switch
@@ -94,6 +125,16 @@ public sealed class LocationSpec
             }
             case LocationKind.GoogleCloudStorage:
                 return Join("https://storage.cloud.google.com", Container, Path, "");
+            case LocationKind.Sftp:
+            {
+                // Display form only: SFTP never goes to azcopy.
+                var user = string.IsNullOrWhiteSpace(Username) ? "" : Uri.EscapeDataString(Username.Trim()) + "@";
+                var port = Port is 22 or <= 0 ? "" : ":" + Port;
+                var path = SftpPath;
+                var sep = path.StartsWith('/') ? "" : "/~/";
+                if (path == ".") { path = ""; sep = "/~/"; }
+                return $"sftp://{user}{Host.Trim()}{port}{sep}{path}";
+            }
             default:
                 throw new ArgumentOutOfRangeException(nameof(Kind), Kind, null);
         }
@@ -155,6 +196,13 @@ public sealed class LocationSpec
             case LocationKind.AmazonS3:
             case LocationKind.GoogleCloudStorage:
                 break; // an empty bucket means "whole account/project"
+            case LocationKind.Sftp:
+                if (string.IsNullOrWhiteSpace(Host)) yield return $"{label}: enter the SFTP host.";
+                if (Port is <= 0 or > 65535) yield return $"{label}: the SFTP port must be between 1 and 65535.";
+                if (string.IsNullOrWhiteSpace(Username)) yield return $"{label}: enter the SFTP user name.";
+                if (string.IsNullOrEmpty(Password) && string.IsNullOrWhiteSpace(PrivateKeyPath))
+                    yield return $"{label}: enter an SFTP password or choose a private key file.";
+                break;
         }
     }
 

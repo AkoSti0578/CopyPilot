@@ -486,8 +486,8 @@
 
                             <TextBlock Margin="0,20,0,0" TextWrapping="Wrap" FontSize="13" LineHeight="20">
                                 CopyPilot is a Windows front-end for Microsoft AzCopy. It lets you copy and synchronise files and folders between
-                                local disks, network shares, Azure Blob Storage, Azure Data Lake Storage Gen2, Azure Files, Amazon S3 and
-                                Google Cloud Storage — with every AzCopy option available from a friendly interface.
+                                local disks, network shares, Azure Blob Storage, Azure Data Lake Storage Gen2, Azure Files, Amazon S3,
+                                Google Cloud Storage and SFTP servers — with every AzCopy option available from a friendly interface.
                             </TextBlock>
 
                             <TextBlock Text="Credits" Style="{StaticResource FieldLabel}" Margin="0,20,0,4" />
@@ -495,6 +495,8 @@
                                 <Run Text="Powered by Microsoft AzCopy" />
                                 <Run Text="{Binding AzCopyVersion, Mode=OneWay}" FontWeight="SemiBold" />
                                 <Run Text="— © Microsoft Corporation, MIT License." />
+                                <LineBreak />
+                                <Run Text="SFTP support by SSH.NET — © the SSH.NET contributors, MIT License." />
                             </TextBlock>
                             <WrapPanel Margin="0,10,0,0">
                                 <Button Style="{StaticResource LinkButton}" Content="AzCopy documentation" Margin="0,0,16,0"

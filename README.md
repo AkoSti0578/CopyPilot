@@ -17,6 +17,7 @@ A recent AzCopy is bundled, so the MSI installs everything you need. No separate
   - Azure Files (SMB and NFS)
   - Amazon S3
   - Google Cloud Storage
+  - SFTP servers (SSH), see below
   - any URL you paste
   - pipes (stream a file through stdin/stdout)
 - **All options**: over 100 AzCopy flags, grouped by category, searchable and filtered to the selected command.
@@ -33,6 +34,27 @@ A recent AzCopy is bundled, so the MSI installs everything you need. No separate
 - **AzCopy updates**: *AzCopy & tools → Download latest AzCopy* fetches the newest release from Microsoft.
   You can also point CopyPilot to your own `azcopy.exe`.
 - **About page** crediting the creator, Arnold Kolkman.
+
+## SFTP (SSH)
+
+AzCopy has no SFTP support, so CopyPilot runs SFTP transfers itself using [SSH.NET](https://github.com/sshnet/SSH.NET).
+Pick **SFTP server (SSH)** as the source or destination of **Copy** or **Sync**:
+
+| Route | How it runs |
+| --- | --- |
+| Local ↔ SFTP, SFTP ↔ SFTP | Directly by CopyPilot |
+| SFTP → Azure (Blob / ADLS Gen2 / Files) | CopyPilot downloads to a local staging folder, then AzCopy uploads with all your options |
+| Azure / S3 / GCS → SFTP | AzCopy downloads to a local staging folder, then CopyPilot uploads |
+
+- **Authentication:** password (also used for keyboard-interactive), private key (OpenSSH, PEM or PuTTY `.ppk`, with an optional passphrase), or both.
+- **Host keys:** the server key is trusted on first use and stored in `%APPDATA%\CopyPilot\known_hosts`.
+  After that, a changed key is refused. You can also pin a `SHA256:` fingerprint per location.
+- **Supported options:** `--recursive`, `--as-subdir`, `--include-pattern`, `--exclude-pattern`, `--overwrite` (true/false/ifSourceNewer)
+  and `--dry-run`. For Sync, files are compared by size and last-modified time, and `--delete-destination` is supported.
+  Wildcards such as `/data/*.csv` also work. Last-modified times are preserved.
+- **CopyPilot settings** in the *SFTP* group on the Options tab: the staging folder (default `%TEMP%\CopyPilot\staging`),
+  keeping the staged files, and the connection timeout. Staged files are deleted after the transfer by default.
+- Transfers that involve SFTP can't be exported as an AzCopy script. Save them as a profile instead.
 
 ## Install
 
@@ -61,7 +83,8 @@ once so that `build\azcopy\azcopy.exe` exists. You can also put `azcopy.exe` on 
 | --- | --- |
 | `src/CopyPilot.Core` | AzCopy command/option catalog, URL builder, command builder, output parser, runner, profiles (cross-platform, unit-tested) |
 | `src/CopyPilot` | WPF application (MVVM) |
-| `tests/CopyPilot.Core.Tests` | xUnit tests |
+| `src/CopyPilot.Core/Sftp` | SFTP engine: local/SFTP file trees, copy/sync engine, known-hosts store |
+| `tests/CopyPilot.Core.Tests` | xUnit tests (SFTP integration tests run when `COPYPILOT_SFTP_TEST=host:port:user:password[:keyfile:passphrase]` is set) |
 | `installer` | WiX v5 MSI project |
 | `build.ps1` | End-to-end build script |
 
@@ -69,3 +92,4 @@ once so that `build\azcopy\azcopy.exe` exists. You can also put `azcopy.exe` on 
 
 - **CopyPilot**: © 2026 Arnold Kolkman.
 - **AzCopy**: © Microsoft Corporation, MIT License. https://github.com/Azure/azure-storage-azcopy
+- **SSH.NET** (SFTP): © the SSH.NET contributors, MIT License. https://github.com/sshnet/SSH.NET

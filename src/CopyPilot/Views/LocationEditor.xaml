@@ -72,6 +72,48 @@
                              ToolTip="Shared access signature, e.g. sv=2024-...&amp;sig=... (with or without leading ?)" />
             </StackPanel>
 
+            <!-- SFTP -->
+            <StackPanel Visibility="{Binding IsSftp, Converter={StaticResource BoolToVis}}">
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="10" />
+                        <ColumnDefinition Width="90" />
+                    </Grid.ColumnDefinitions>
+                    <StackPanel>
+                        <TextBlock Text="Host" Style="{StaticResource FieldLabel}" />
+                        <TextBox Text="{Binding Host, UpdateSourceTrigger=PropertyChanged}" ToolTip="Host name or IP address, e.g. sftp.example.com" />
+                    </StackPanel>
+                    <StackPanel Grid.Column="2">
+                        <TextBlock Text="Port" Style="{StaticResource FieldLabel}" />
+                        <TextBox Text="{Binding Port, UpdateSourceTrigger=PropertyChanged}" />
+                    </StackPanel>
+                </Grid>
+                <TextBlock Text="User name" Style="{StaticResource FieldLabel}" />
+                <TextBox Text="{Binding Username, UpdateSourceTrigger=PropertyChanged}" />
+                <TextBlock Text="Password (or leave empty and use a key)" Style="{StaticResource FieldLabel}" />
+                <PasswordBox v:PasswordBoxAssistant.BoundPassword="{Binding Password, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                <TextBlock Text="Private key file (optional)" Style="{StaticResource FieldLabel}" />
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <TextBox Text="{Binding PrivateKeyPath, UpdateSourceTrigger=PropertyChanged}" ToolTip="OpenSSH (id_ed25519, id_rsa), PEM or PuTTY .ppk key" />
+                    <Button Grid.Column="1" Content="Browse…" Margin="6,0,0,0" Command="{Binding BrowseKeyCommand}" />
+                </Grid>
+                <TextBlock Text="Key passphrase (if the key is encrypted)" Style="{StaticResource FieldLabel}" />
+                <PasswordBox v:PasswordBoxAssistant.BoundPassword="{Binding PrivateKeyPassphrase, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                <TextBlock Text="Remote path" Style="{StaticResource FieldLabel}" />
+                <TextBox Text="{Binding Path, UpdateSourceTrigger=PropertyChanged}" Style="{StaticResource MonoTextBox}"
+                         ToolTip="e.g. /home/arnold/data, data/*.csv (relative to the home folder) or /upload/file.zip" />
+                <TextBlock Text="Host key fingerprint (optional)" Style="{StaticResource FieldLabel}" />
+                <TextBox Text="{Binding HostKeyFingerprint, UpdateSourceTrigger=PropertyChanged}" Style="{StaticResource MonoTextBox}"
+                         ToolTip="SHA256:... as shown by 'ssh-keygen -lf'. Empty: the key is trusted on first connect and remembered; a changed key is refused." />
+                <TextBlock Style="{StaticResource Hint}"
+                           Text="Empty: the server's key is trusted on first connect and remembered; if it changes later, the connection is refused." />
+            </StackPanel>
+
             <!-- Custom URL -->
             <StackPanel Visibility="{Binding IsCustomUrl, Converter={StaticResource BoolToVis}}">
                 <TextBlock Text="URL" Style="{StaticResource FieldLabel}" />

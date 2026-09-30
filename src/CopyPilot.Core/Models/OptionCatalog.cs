@@ -28,6 +28,7 @@ public static class OptionCatalog
     private const string CatLogin = "Login";
     private const string CatJobs = "Jobs";
     private const string CatEnv = "Environment";
+    private const string CatSftp = "SFTP (handled by CopyPilot)";
 
     public static IReadOnlyList<string> FromToValues { get; } =
     [
@@ -198,6 +199,13 @@ public static class OptionCatalog
 
         // ---- Env -------------------------------------------------------------------------------
         Flag("show-sensitive", CatEnv, "Show sensitive/secret environment variables.", Cmds(Env)),
+
+        // ---- SFTP (CopyPilot settings, not azcopy flags) --------------------------------------
+        new("sftp-staging-folder", OptionKind.FolderPath, CatSftp,
+            "Local folder used to stage files when copying between SFTP and cloud storage. Default: %TEMP%\\CopyPilot\\staging.",
+            Cmds(Copy, Sync), CopyPilotOnly: true),
+        Flag("sftp-keep-staged-files", CatSftp, "Keep the staged files after an SFTP ↔ cloud transfer (they are deleted by default).", Cmds(Copy, Sync)) with { CopyPilotOnly = true },
+        Num("sftp-timeout-seconds", CatSftp, "SSH connection timeout in seconds.", Cmds(Copy, Sync), "30") with { CopyPilotOnly = true },
     ];
 
     public static IEnumerable<OptionDefinition> For(string commandId) =>

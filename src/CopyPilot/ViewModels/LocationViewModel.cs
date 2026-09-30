@@ -22,6 +22,7 @@ public sealed class LocationViewModel : ObservableObject
         _spec = spec;
         BrowseFileCommand = new RelayCommand(BrowseFile);
         BrowseFolderCommand = new RelayCommand(BrowseFolder);
+        BrowseKeyCommand = new RelayCommand(BrowseKey);
     }
 
     public string Header { get; }
@@ -35,6 +36,7 @@ public sealed class LocationViewModel : ObservableObject
         new(LocationKind.AzureFiles, "Azure Files (SMB / NFS share)"),
         new(LocationKind.AmazonS3, "Amazon S3"),
         new(LocationKind.GoogleCloudStorage, "Google Cloud Storage"),
+        new(LocationKind.Sftp, "SFTP server (SSH)"),
         new(LocationKind.CustomUrl, "Any URL (paste a full URL, e.g. with SAS)"),
         new(LocationKind.Pipe, "Pipe (stream from / to a file via stdin / stdout)"),
     ];
@@ -75,12 +77,27 @@ public sealed class LocationViewModel : ObservableObject
     public string Region { get => _spec.Region; set => Update(() => _spec.Region = value); }
     public string Url { get => _spec.Url; set => Update(() => _spec.Url = value); }
 
+    public string Host { get => _spec.Host; set => Update(() => _spec.Host = value); }
+    public string Username { get => _spec.Username; set => Update(() => _spec.Username = value); }
+    public string Password { get => _spec.Password; set => Update(() => _spec.Password = value); }
+    public string PrivateKeyPath { get => _spec.PrivateKeyPath; set => Update(() => _spec.PrivateKeyPath = value); }
+    public string PrivateKeyPassphrase { get => _spec.PrivateKeyPassphrase; set => Update(() => _spec.PrivateKeyPassphrase = value); }
+    public string HostKeyFingerprint { get => _spec.HostKeyFingerprint; set => Update(() => _spec.HostKeyFingerprint = value); }
+
+    /// <summary>Port as text so a half-typed value does not throw binding errors; invalid input becomes 0 (reported by validation).</summary>
+    public string Port
+    {
+        get => _spec.Port.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        set => Update(() => _spec.Port = int.TryParse(value, out var p) ? p : 0);
+    }
+
     public bool IsLocal => _spec.Kind == LocationKind.Local;
     public bool IsPipe => _spec.Kind == LocationKind.Pipe;
     public bool IsAzure => _spec.Kind is LocationKind.AzureBlob or LocationKind.AzureDataLakeGen2 or LocationKind.AzureFiles;
     public bool IsS3 => _spec.Kind == LocationKind.AmazonS3;
     public bool IsBucketBased => _spec.Kind is LocationKind.AmazonS3 or LocationKind.GoogleCloudStorage;
     public bool IsCustomUrl => _spec.Kind == LocationKind.CustomUrl;
+    public bool IsSftp => _spec.Kind == LocationKind.Sftp;
     public bool HasContainer => IsAzure || IsBucketBased;
     public bool UsesLocalPath => IsLocal || IsPipe;
     public string LocalPathLabel => IsPipe ? (IsDestination ? "Save the stream to file" : "File to stream") : "Local path";
@@ -106,6 +123,9 @@ public sealed class LocationViewModel : ObservableObject
         LocationKind.Pipe => IsDestination
             ? "azcopy writes the downloaded blob to stdout; CopyPilot saves it to this file. Only works with an Azure Blob source."
             : "CopyPilot streams this file into azcopy's stdin. Only works with an Azure Blob destination.",
+        LocationKind.Sftp => IsDestination
+            ? "CopyPilot uploads over SFTP. The path is a folder (created if needed); a single file may also be given a new file name. From cloud storage, files are first staged in a local folder by azcopy."
+            : "CopyPilot downloads over SFTP. Use a file, a folder (with --recursive) or a wildcard like /data/*.csv. To cloud storage, files are first staged in a local folder, then uploaded by azcopy.",
         LocationKind.Local => "Use wildcards like C:\\data\\*.csv. UNC paths (\\\\server\\share\\folder) are supported.",
         _ => "",
     };
@@ -123,6 +143,7 @@ public sealed class LocationViewModel : ObservableObject
 
     public ICommand BrowseFileCommand { get; }
     public ICommand BrowseFolderCommand { get; }
+    public ICommand BrowseKeyCommand { get; }
 
     private void Update(Action apply)
     {
@@ -144,6 +165,18 @@ public sealed class LocationViewModel : ObservableObject
         var dlg = new OpenFileDialog { Title = Header, CheckFileExists = !IsDestination };
         if (dlg.ShowDialog() == true) LocalPath = dlg.FileName;
         OnPropertyChanged(nameof(LocalPath));
+    }
+
+    private void BrowseKey()
+    {
+        var dlg = new OpenFileDialog
+        {
+            Title = "Select SSH private key",
+            Filter = "Private keys (id_*;*.pem;*.key;*.ppk)|id_*;*.pem;*.key;*.ppk|All files (*.*)|*.*",
+            InitialDirectory = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".ssh"),
+        };
+        if (dlg.ShowDialog() == true) PrivateKeyPath = dlg.FileName;
+        OnPropertyChanged(nameof(PrivateKeyPath));
     }
 
     private void BrowseFolder()
