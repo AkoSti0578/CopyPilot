@@ -29,11 +29,11 @@ public sealed class EmptyToCollapsedConverter : IValueConverter
 /// <summary>Colors log lines by kind.</summary>
 public sealed class LogKindToBrushConverter : IValueConverter
 {
-    private static readonly Brush Info = Freeze(new SolidColorBrush(Color.FromRgb(0xE6, 0xE9, 0xEE)));
+    private static readonly Brush Info = Freeze(new SolidColorBrush(Color.FromRgb(0xF3, 0xED, 0xF7)));
     private static readonly Brush Warning = Freeze(new SolidColorBrush(Color.FromRgb(0xF5, 0xC2, 0x6B)));
     private static readonly Brush Error = Freeze(new SolidColorBrush(Color.FromRgb(0xFF, 0x7B, 0x72)));
-    private static readonly Brush Command = Freeze(new SolidColorBrush(Color.FromRgb(0x79, 0xC0, 0xFF)));
-    private static readonly Brush Progress = Freeze(new SolidColorBrush(Color.FromRgb(0xA5, 0xD6, 0xFF)));
+    private static readonly Brush Command = Freeze(new SolidColorBrush(Color.FromRgb(0xC9, 0xA6, 0xDE)));
+    private static readonly Brush Progress = Freeze(new SolidColorBrush(Color.FromRgb(0xF3, 0xE0, 0x4F)));
     private static readonly Brush Success = Freeze(new SolidColorBrush(Color.FromRgb(0x7E, 0xE7, 0x87)));
 
     private static Brush Freeze(Brush b)

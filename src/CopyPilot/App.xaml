@@ -6,24 +6,29 @@
     <Application.Resources>
         <ResourceDictionary>
             <!-- Palette -->
-            <Color x:Key="AccentColor">#0F6CBD</Color>
-            <Color x:Key="AccentDarkColor">#0A3D91</Color>
+            <!-- Yellow Spring brand: purple is dominant, yellow is the accent. -->
+            <Color x:Key="AccentColor">#6F2C91</Color>
+            <Color x:Key="AccentDarkColor">#4E1F66</Color>
+            <Color x:Key="BrandYellowColor">#F3E04F</Color>
             <SolidColorBrush x:Key="AccentBrush" Color="{StaticResource AccentColor}" />
             <SolidColorBrush x:Key="AccentDarkBrush" Color="{StaticResource AccentDarkColor}" />
-            <SolidColorBrush x:Key="AccentLightBrush" Color="#E8F1FB" />
-            <SolidColorBrush x:Key="WindowBrush" Color="#F3F5F8" />
+            <SolidColorBrush x:Key="BrandYellowBrush" Color="{StaticResource BrandYellowColor}" />
+            <SolidColorBrush x:Key="BrandYellowDarkBrush" Color="#D4C03A" />
+            <SolidColorBrush x:Key="AccentLightBrush" Color="#F3EDF7" />
+            <SolidColorBrush x:Key="SoftPurpleBrush" Color="#E6D8EF" />
+            <SolidColorBrush x:Key="WindowBrush" Color="#F8F5FA" />
             <SolidColorBrush x:Key="SurfaceBrush" Color="#FFFFFF" />
-            <SolidColorBrush x:Key="BorderBrush" Color="#D6DCE4" />
-            <SolidColorBrush x:Key="TextBrush" Color="#1B1F24" />
-            <SolidColorBrush x:Key="SecondaryTextBrush" Color="#5B6573" />
+            <SolidColorBrush x:Key="BorderBrush" Color="#E6D8EF" />
+            <SolidColorBrush x:Key="TextBrush" Color="#2B1A36" />
+            <SolidColorBrush x:Key="SecondaryTextBrush" Color="#6B6B6B" />
             <SolidColorBrush x:Key="WarningBrush" Color="#B45309" />
             <SolidColorBrush x:Key="SuccessBrush" Color="#15803D" />
-            <SolidColorBrush x:Key="ConsoleBrush" Color="#161B22" />
+            <SolidColorBrush x:Key="ConsoleBrush" Color="#2B1A36" />
             <FontFamily x:Key="MonoFont">Cascadia Mono, Consolas, Courier New</FontFamily>
 
             <LinearGradientBrush x:Key="HeaderBrush" StartPoint="0,0" EndPoint="1,1">
-                <GradientStop Color="#1E8BF0" Offset="0" />
-                <GradientStop Color="#0A3D91" Offset="1" />
+                <GradientStop Color="#6F2C91" Offset="0" />
+                <GradientStop Color="#4E1F66" Offset="1" />
             </LinearGradientBrush>
 
             <!-- Converters -->
@@ -123,9 +128,9 @@
             </Style>
 
             <Style x:Key="AccentButton" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
-                <Setter Property="Background" Value="{StaticResource AccentBrush}" />
-                <Setter Property="BorderBrush" Value="{StaticResource AccentDarkBrush}" />
-                <Setter Property="Foreground" Value="White" />
+                <Setter Property="Background" Value="{StaticResource BrandYellowBrush}" />
+                <Setter Property="BorderBrush" Value="{StaticResource BrandYellowDarkBrush}" />
+                <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
                 <Setter Property="FontWeight" Value="SemiBold" />
                 <Setter Property="Padding" Value="20,6" />
             </Style>
@@ -183,7 +188,7 @@
 
             <Style TargetType="ProgressBar">
                 <Setter Property="Foreground" Value="{StaticResource AccentBrush}" />
-                <Setter Property="Background" Value="#E3E8EF" />
+                <Setter Property="Background" Value="{StaticResource SoftPurpleBrush}" />
                 <Setter Property="BorderThickness" Value="0" />
                 <Setter Property="Height" Value="8" />
             </Style>

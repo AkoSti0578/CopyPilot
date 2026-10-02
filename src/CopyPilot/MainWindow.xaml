@@ -121,11 +121,11 @@
                 <Image Source="Assets/copypilot.png" Width="44" Height="44" Margin="0,0,14,0" RenderOptions.BitmapScalingMode="HighQuality" />
                 <StackPanel Grid.Column="1" VerticalAlignment="Center">
                     <TextBlock Text="CopyPilot" FontSize="24" FontWeight="Bold" Foreground="White" />
-                    <TextBlock Foreground="#DCE9FA" FontSize="12.5">
+                    <TextBlock Foreground="{StaticResource SoftPurpleBrush}" FontSize="12.5">
                         <Run Text="The graphical cockpit for Microsoft AzCopy" />
                         <Run Text="  ·  " />
                         <Run Text="created by" />
-                        <Run Text="{Binding AuthorName, Mode=OneWay}" FontWeight="SemiBold" Foreground="White" />
+                        <Run Text="{Binding AuthorName, Mode=OneWay}" FontWeight="SemiBold" Foreground="{StaticResource BrandYellowBrush}" />
                     </TextBlock>
                 </StackPanel>
                 <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center">
@@ -476,7 +476,8 @@
                                 </StackPanel>
                             </StackPanel>
 
-                            <Border Background="{StaticResource AccentLightBrush}" CornerRadius="8" Padding="20,16" Margin="0,24,0,0">
+                            <Border Background="{StaticResource AccentLightBrush}" BorderBrush="{StaticResource BrandYellowBrush}" BorderThickness="6,0,0,0"
+                                    CornerRadius="8" Padding="20,16" Margin="0,24,0,0">
                                 <StackPanel>
                                     <TextBlock Text="Created by" FontSize="13" Foreground="{StaticResource SecondaryTextBrush}" />
                                     <TextBlock Text="{Binding AuthorName}" FontSize="28" FontWeight="SemiBold" Foreground="{StaticResource AccentDarkBrush}" />
