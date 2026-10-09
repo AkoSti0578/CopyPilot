@@ -368,14 +368,14 @@ public class SharePointTests
 
         // Invalid names fail clearly but do not stop the job.
         local.Write("bad/ok.txt", "ok");
-        local.Write("bad/what?.txt", "x");
+        local.Write("bad/~$draft.docx", "x"); // valid on Windows, rejected by SharePoint
         log.Clear();
         Assert.Equal(1, await Run(graph, new CommandRequest
         {
             Command = copy, Source = new LocationSpec { LocalPath = Path.Combine(local.Path, "bad") }, Destination = Library("Projects"),
             Options = new Dictionary<string, string> { ["recursive"] = "true" },
         }, log));
-        Assert.Contains(log, l => l.StartsWith("ERROR:") && l.Contains("character SharePoint does not allow"));
+        Assert.Contains(log, l => l.StartsWith("ERROR:") && l.Contains("Office lock file"));
         Assert.Equal("ok", graph.Text("Projects/bad/ok.txt"));
         Assert.Contains("Final Job Status: CompletedWithErrors", log);
     }
