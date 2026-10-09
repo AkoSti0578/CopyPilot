@@ -184,13 +184,13 @@ public sealed class SftpFileTree : IFileTree
 
     public Task DeleteFileAsync(string path, CancellationToken ct) => _client.DeleteFileAsync(path, ct);
 
-    public Stream OpenRead(string path) => _client.OpenRead(path);
+    public Task<Stream> OpenReadAsync(string path, CancellationToken ct) => Task.Run<Stream>(() => _client.OpenRead(path), ct);
 
     public Task ReadIntoAsync(string path, Stream destination, Action<long> progress, CancellationToken ct) =>
         _client.DownloadFileAsync(path, destination,
             new InlineProgress<DownloadFileProgressReport>(r => progress((long)r.TotalBytesDownloaded)), ct);
 
-    public Task WriteFromAsync(string path, Stream source, Action<long> progress, CancellationToken ct) =>
+    public Task WriteFromAsync(string path, Stream source, long length, DateTime lastWriteUtc, Action<long> progress, CancellationToken ct) =>
         _client.UploadFileAsync(source, path, true,
             new InlineProgress<UploadFileProgressReport>(r => progress((long)r.TotalBytesUploaded)), ct);
 

@@ -79,7 +79,11 @@ public sealed class MainViewModel : ObservableObject
     public MainViewModel()
     {
         _settings = AppSettings.Load();
-        _transferRunner = new TransferRunner(_runner) { KnownHostsFile = Path.Combine(AppSettings.Folder, "known_hosts") };
+        _transferRunner = new TransferRunner(_runner)
+        {
+            KnownHostsFile = Path.Combine(AppSettings.Folder, "known_hosts"),
+            TokenCacheFile = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "CopyPilot", "msal-token-cache.bin"),
+        };
         _selectedCommand = CommandCatalog.Get(CommandCatalog.Copy);
 
         Source = new LocationViewModel("Source", new LocationSpec { Kind = LocationKind.Local }, isDestination: false);
@@ -285,7 +289,7 @@ public sealed class MainViewModel : ObservableObject
         IsValid = plan.IsValid;
         ValidationText = !plan.IsValid ? "⚠ " + string.Join("  ", plan.Errors)
             : plan.Warnings.Count > 0 ? "✔ Ready to run.  ⓘ " + string.Join("  ", plan.Warnings)
-            : plan.IsSftp ? "✔ Ready to run (SFTP is handled by CopyPilot" + (plan.NeedsAzCopy ? " together with azcopy)." : ").")
+            : plan.IsSftp ? "✔ Ready to run (SFTP / SharePoint is handled by CopyPilot" + (plan.NeedsAzCopy ? " together with azcopy)." : ").")
             : "✔ Command is ready to run.";
         OnPropertyChanged(nameof(OptionCountText));
         OnPropertyChanged(nameof(EnvironmentCountText));
@@ -399,7 +403,7 @@ public sealed class MainViewModel : ObservableObject
         IsIndeterminate = true;
         CountsText = "";
         RunningJobId = "";
-        StatusText = $"Running '{plan.Request.Command.Title}'" + (plan.IsSftp ? " (SFTP)" : "") + " …";
+        StatusText = $"Running '{plan.Request.Command.Title}'" + (plan.IsSftp ? " (CopyPilot transfer)" : "") + " …";
         SelectedTabIndex = TabLog;
         foreach (var line in plan.ToDisplayString(exe ?? "azcopy").Split('\n'))
             AddLog(new LogLine("> " + line.TrimEnd('\r'), LogKind.Command));

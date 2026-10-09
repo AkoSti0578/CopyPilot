@@ -45,6 +45,8 @@ public sealed class Profile
             c.Sas = "";
             c.Password = "";
             c.PrivateKeyPassphrase = "";
+            c.ClientSecret = "";
+            c.CertificatePassword = "";
             c.Url = StripQuery(c.Url);
             return c;
         }

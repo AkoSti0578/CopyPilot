@@ -13,6 +13,15 @@ public interface IFileTree : IDisposable
 
     bool IsLocal { get; }
 
+    /// <summary>
+    /// False when the service may change a file's size after upload (SharePoint adds metadata to Office files),
+    /// so sync must compare last-modified times only.
+    /// </summary>
+    bool HasExactSizes => true;
+
+    /// <summary>True when <see cref="WriteFromAsync"/> already stores the last-modified time.</summary>
+    bool SetsLastWriteTimeOnWrite => false;
+
     string Combine(string directory, string name);
     string GetName(string path);
     string GetParent(string path);
@@ -26,13 +35,16 @@ public interface IFileTree : IDisposable
     Task SetLastWriteTimeUtcAsync(string path, DateTime utc, CancellationToken ct);
     Task DeleteFileAsync(string path, CancellationToken ct);
 
-    Stream OpenRead(string path);
+    Task<Stream> OpenReadAsync(string path, CancellationToken ct);
 
     /// <summary>Downloads <paramref name="path"/> into <paramref name="destination"/>. Progress is cumulative bytes of this file.</summary>
     Task ReadIntoAsync(string path, Stream destination, Action<long> progress, CancellationToken ct);
 
-    /// <summary>Creates/overwrites <paramref name="path"/> with the content of <paramref name="source"/>. Progress is cumulative bytes.</summary>
-    Task WriteFromAsync(string path, Stream source, Action<long> progress, CancellationToken ct);
+    /// <summary>
+    /// Creates/overwrites <paramref name="path"/> with <paramref name="length"/> bytes from <paramref name="source"/>.
+    /// Progress is cumulative bytes.
+    /// </summary>
+    Task WriteFromAsync(string path, Stream source, long length, DateTime lastWriteUtc, Action<long> progress, CancellationToken ct);
 }
 
 /// <summary>Synchronous IProgress (Progress&lt;T&gt; would post to the UI thread).</summary>
@@ -99,16 +111,16 @@ public sealed class LocalFileTree : IFileTree
         return Task.CompletedTask;
     }
 
-    public Stream OpenRead(string path) =>
-        new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 1 << 16, useAsync: true);
+    public Task<Stream> OpenReadAsync(string path, CancellationToken ct) =>
+        Task.FromResult<Stream>(new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 1 << 16, useAsync: true));
 
     public async Task ReadIntoAsync(string path, Stream destination, Action<long> progress, CancellationToken ct)
     {
-        await using var source = OpenRead(path);
+        await using var source = await OpenReadAsync(path, ct).ConfigureAwait(false);
         await CopyWithProgressAsync(source, destination, progress, ct).ConfigureAwait(false);
     }
 
-    public async Task WriteFromAsync(string path, Stream source, Action<long> progress, CancellationToken ct)
+    public async Task WriteFromAsync(string path, Stream source, long length, DateTime lastWriteUtc, Action<long> progress, CancellationToken ct)
     {
         await using var target = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.None, 1 << 16, useAsync: true);
         await CopyWithProgressAsync(source, target, progress, ct).ConfigureAwait(false);

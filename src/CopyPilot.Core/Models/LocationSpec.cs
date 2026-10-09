@@ -15,6 +15,21 @@ public enum LocationKind
     Pipe,
     /// <summary>SFTP server (SSH). Handled by CopyPilot itself, as azcopy does not support SFTP.</summary>
     Sftp,
+    /// <summary>SharePoint Online / OneDrive document library via Microsoft Graph. Handled by CopyPilot itself.</summary>
+    SharePoint,
+}
+
+/// <summary>How CopyPilot signs in to Microsoft Graph for SharePoint.</summary>
+public enum SharePointAuthMode
+{
+    /// <summary>Sign in as a user in the system browser (needs redirect URI http://localhost in the app registration).</summary>
+    Interactive,
+    /// <summary>Sign in as a user with a device code (shown in the output; works without a local browser).</summary>
+    DeviceCode,
+    /// <summary>App-only with a client secret (unattended).</summary>
+    ClientSecret,
+    /// <summary>App-only with a certificate (unattended, recommended over secrets).</summary>
+    Certificate,
 }
 
 /// <summary>A source or destination, described by its parts. <see cref="Build"/> turns it into what azcopy expects.</summary>
@@ -70,6 +85,29 @@ public sealed class LocationSpec
     /// </summary>
     public string HostKeyFingerprint { get; set; } = "";
 
+    /// <summary>SharePoint site URL, e.g. https://contoso.sharepoint.com/sites/Team (or a OneDrive URL).</summary>
+    public string SiteUrl { get; set; } = "";
+
+    /// <summary>Document library name (e.g. "Documents" / "Gedeelde documenten"). Empty = the site's default library.</summary>
+    public string Library { get; set; } = "";
+
+    /// <summary>Microsoft Entra tenant (id or domain, e.g. contoso.onmicrosoft.com). Empty = "organizations" (user sign-in only).</summary>
+    public string TenantId { get; set; } = "";
+
+    /// <summary>Application (client) id of the app registration CopyPilot signs in with.</summary>
+    public string ClientId { get; set; } = "";
+
+    public SharePointAuthMode SharePointAuth { get; set; } = SharePointAuthMode.Interactive;
+
+    /// <summary>Client secret for <see cref="SharePointAuthMode.ClientSecret"/> (secret).</summary>
+    public string ClientSecret { get; set; } = "";
+
+    /// <summary>Certificate file (.pfx) for <see cref="SharePointAuthMode.Certificate"/>.</summary>
+    public string CertificatePath { get; set; } = "";
+
+    /// <summary>Password of the certificate file (secret).</summary>
+    public string CertificatePassword { get; set; } = "";
+
     public static IReadOnlyList<string> AzureEndpointSuffixes { get; } =
     [
         "core.windows.net",
@@ -81,6 +119,13 @@ public sealed class LocationSpec
 
     public bool IsSftp => Kind == LocationKind.Sftp;
 
+    public bool IsSharePoint => Kind == LocationKind.SharePoint;
+
+    /// <summary>Locations azcopy cannot reach; CopyPilot transfers them itself (SFTP, SharePoint).</summary>
+    public bool IsCopyPilotHandled => Kind is LocationKind.Sftp or LocationKind.SharePoint;
+
+    /// <summary>Folder path inside the SharePoint library, '/'-separated, "" = library root.</summary>
+    public string SharePointPath => Path.Trim().Replace('\\', '/').TrimStart('/');
     /// <summary>The SFTP path, "." (home directory) when empty.</summary>
     public string SftpPath => string.IsNullOrWhiteSpace(Path) ? "." : Path.Trim().Replace('\\', '/');
 
@@ -125,6 +170,13 @@ public sealed class LocationSpec
             }
             case LocationKind.GoogleCloudStorage:
                 return Join("https://storage.cloud.google.com", Container, Path, "");
+            case LocationKind.SharePoint:
+            {
+                // Display form only: SharePoint never goes to azcopy.
+                var lib = string.IsNullOrWhiteSpace(Library) ? "(default library)" : Library.Trim();
+                var path = SharePointPath;
+                return $"{SiteUrl.Trim().TrimEnd('/')} » {lib}" + (path.Length > 0 ? " » " + path : "");
+            }
             case LocationKind.Sftp:
             {
                 // Display form only: SFTP never goes to azcopy.
@@ -196,6 +248,22 @@ public sealed class LocationSpec
             case LocationKind.AmazonS3:
             case LocationKind.GoogleCloudStorage:
                 break; // an empty bucket means "whole account/project"
+            case LocationKind.SharePoint:
+                if (!Uri.TryCreate(SiteUrl.Trim(), UriKind.Absolute, out var site) || site.Scheme != Uri.UriSchemeHttps)
+                    yield return $"{label}: enter the SharePoint site URL, e.g. https://contoso.sharepoint.com/sites/Team.";
+                if (!Guid.TryParse(ClientId.Trim(), out _))
+                    yield return $"{label}: enter the application (client) id of your app registration.";
+                if (SharePointAuth is SharePointAuthMode.ClientSecret or SharePointAuthMode.Certificate)
+                {
+                    if (string.IsNullOrWhiteSpace(TenantId))
+                        yield return $"{label}: app-only sign-in needs the tenant id or domain.";
+                    if (SharePointAuth == SharePointAuthMode.ClientSecret && string.IsNullOrEmpty(ClientSecret))
+                        yield return $"{label}: enter the client secret.";
+                    if (SharePointAuth == SharePointAuthMode.Certificate && string.IsNullOrWhiteSpace(CertificatePath))
+                        yield return $"{label}: choose the certificate (.pfx) file.";
+                }
+
+                break;
             case LocationKind.Sftp:
                 if (string.IsNullOrWhiteSpace(Host)) yield return $"{label}: enter the SFTP host.";
                 if (Port is <= 0 or > 65535) yield return $"{label}: the SFTP port must be between 1 and 65535.";

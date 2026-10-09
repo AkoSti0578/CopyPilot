@@ -228,7 +228,7 @@ public sealed class TreeCopier(Action<string> output)
         var existing = await dst.StatAsync(target, ct).ConfigureAwait(false);
         if (existing?.IsDirectory == true)
             throw new IOException($"'{target}' is a directory at the destination.");
-        if (ShouldSkip(entry, existing, o)) return CopyOutcome.Skipped;
+        if (ShouldSkip(entry, existing, o, dst.HasExactSizes && src.HasExactSizes)) return CopyOutcome.Skipped;
 
         if (o.DryRun)
         {
@@ -244,11 +244,12 @@ public sealed class TreeCopier(Action<string> output)
         }
         else
         {
-            await using var stream = src.OpenRead(entry.Path);
-            await dst.WriteFromAsync(target, stream, bytesProgress, ct).ConfigureAwait(false);
+            await using var stream = await src.OpenReadAsync(entry.Path, ct).ConfigureAwait(false);
+            await dst.WriteFromAsync(target, stream, entry.Length, entry.LastWriteUtc, bytesProgress, ct).ConfigureAwait(false);
         }
 
-        await dst.SetLastWriteTimeUtcAsync(target, entry.LastWriteUtc, ct).ConfigureAwait(false);
+        if (!dst.SetsLastWriteTimeOnWrite)
+            await dst.SetLastWriteTimeUtcAsync(target, entry.LastWriteUtc, ct).ConfigureAwait(false);
         return CopyOutcome.Copied;
     }
 
@@ -281,11 +282,11 @@ public sealed class TreeCopier(Action<string> output)
         }
     }
 
-    private static bool ShouldSkip(FileEntry source, FileEntry? existing, TreeCopyOptions o)
+    private static bool ShouldSkip(FileEntry source, FileEntry? existing, TreeCopyOptions o, bool compareSizes)
     {
         if (existing == null) return false;
         if (o.SyncMode)
-            return existing.Length == source.Length && existing.LastWriteUtc >= source.LastWriteUtc - TimeTolerance;
+            return (!compareSizes || existing.Length == source.Length) && existing.LastWriteUtc >= source.LastWriteUtc - TimeTolerance;
         return o.Overwrite switch
         {
             OverwriteMode.Never => true,
