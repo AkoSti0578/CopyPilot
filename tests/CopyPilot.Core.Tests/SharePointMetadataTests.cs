@@ -115,7 +115,7 @@ public class SharePointMetadataTests
         var (code, log, _) = await Run(graph, new LocationSpec { LocalPath = Path.Combine(local.Path, "x.txt") }, Library("out/"), "dates");
 
         Assert.Equal(0, code);
-        Assert.Contains(log, l => l.Contains("switching to ISO"));
+        Assert.Contains(log, l => l.Contains("trying ISO"));
         Near(modified, graph.Items["out/x.txt"].ItemModified);
     }
 
@@ -131,8 +131,58 @@ public class SharePointMetadataTests
         var (code, log, _) = await Run(graph, new LocationSpec { LocalPath = Path.Combine(local.Path, "x.txt") }, Library("out/"), "dates");
 
         Assert.Equal(0, code);
-        Assert.Contains(log, l => l.Contains("switching to ISO"));
+        Assert.Contains(log, l => l.Contains("trying ISO"));
         Near(modified, graph.Items["out/x.txt"].ItemModified);
+    }
+
+    [Fact]
+    public async Task Uses_the_verbose_request_when_the_site_ignores_the_compact_one()
+    {
+        // What a real tenant did: "success" for every field, but nothing stored.
+        var graph = new FakeGraph { IgnoreCompactValidate = true };
+        graph.KnownUsers.Add(Alice);
+        graph.Put("src/a.txt", "a", new DateTime(2024, 2, 3, 10, 15, 0, DateTimeKind.Utc));
+        graph.Put("src/b.txt", "b", new DateTime(2024, 3, 4, 11, 0, 0, DateTimeKind.Utc));
+        foreach (var n in new[] { graph.Items["src/a.txt"], graph.Items["src/b.txt"] })
+        {
+            n.ItemCreated = new DateTime(2024, 1, 2, 9, 0, 0, DateTimeKind.Utc);
+            n.ItemModified = n.Modified;
+            n.Author = n.Editor = Alice;
+        }
+
+        var (code, log, _) = await Run(graph, Library("src"), Library("dst"), "dates-and-authors");
+
+        Assert.Equal(0, code);
+        Assert.Empty(graph.Problems);
+        Assert.Contains(log, l => l.Contains("verbose request"));
+        Assert.Contains(log, l => l.StartsWith("INFO: Diagnostics for") && l.Contains("SharePoint answered"));
+        foreach (var name in new[] { "a.txt", "b.txt" })
+        {
+            var copy = graph.Items["dst/src/" + name];
+            Assert.Equal(Alice, copy.Author);
+            Near(new DateTime(2024, 1, 2, 9, 0, 0, DateTimeKind.Utc), copy.ItemCreated);
+            Near(graph.Items["src/" + name].ItemModified, copy.ItemModified);
+        }
+
+        Assert.DoesNotContain(log, l => l.StartsWith("WARNING"));
+        Assert.Contains(log, l => l.Contains("Created/Modified set on 2 file(s), Created By/Modified By on 2 file(s)"));
+    }
+
+    [Fact]
+    public async Task Explains_what_was_sent_and_stored_when_nothing_sticks()
+    {
+        var graph = new FakeGraph { IgnoreAllValidate = true };
+        using var local = new TempDir();
+        local.Write("x.txt", "x", new DateTime(2025, 1, 20, 8, 5, 0, DateTimeKind.Utc));
+
+        var (code, log, _) = await Run(graph, new LocationSpec { LocalPath = Path.Combine(local.Path, "x.txt") }, Library("out/"), "dates");
+
+        Assert.Equal(0, code); // the file itself is copied
+        Assert.Contains(log, l => l.StartsWith("WARNING: could not set") && l.Contains("SharePoint reported success but kept other values"));
+        var diagnostics = log.Where(l => l.StartsWith("INFO: Diagnostics for")).ToList();
+        Assert.Equal(4, diagnostics.Count); // one per method tried
+        Assert.All(diagnostics, d => Assert.Contains("item now: Created=", d));
+        Assert.True(diagnostics.Any(d => d.Contains("expected") && d.Contains("Modified=2025-01-20 08:05:00Z")), string.Join("\n", diagnostics));
     }
 
     [Fact]

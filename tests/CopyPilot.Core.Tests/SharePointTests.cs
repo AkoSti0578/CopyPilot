@@ -42,6 +42,12 @@ public sealed class FakeGraph : HttpMessageHandler
     public string? ParseCultureOverride { get; set; }
     public bool AcceptIsoOnly { get; set; }
     public bool RestForbidden { get; set; }
+
+    /// <summary>Report success for compact (odata=nometadata) ValidateUpdateListItem calls without saving anything.</summary>
+    public bool IgnoreCompactValidate { get; set; }
+
+    /// <summary>Report success for every ValidateUpdateListItem call without saving anything.</summary>
+    public bool IgnoreAllValidate { get; set; }
     public HashSet<string> KnownUsers { get; } = new(StringComparer.OrdinalIgnoreCase) { Uploader };
     public int UtcToLocalCalls { get; private set; }
     public List<string> ValidateBodies { get; } = [];
@@ -101,7 +107,8 @@ public sealed class FakeGraph : HttpMessageHandler
         if (url.Host == "contoso.sharepoint.com")
         {
             if (auth != SpToken) return new HttpResponseMessage(HttpStatusCode.Unauthorized);
-            if (!request.Headers.Accept.ToString().Contains("odata=nometadata")) Problems.Add("REST call without odata=nometadata");
+            var accept = request.Headers.Accept.ToString();
+            if (!accept.Contains("odata=nometadata") && !accept.Contains("odata=verbose")) Problems.Add("REST call without odata=nometadata/verbose");
             return SharePointRest(request, Uri.UnescapeDataString(url.PathAndQuery), body);
         }
 
@@ -248,12 +255,18 @@ public sealed class FakeGraph : HttpMessageHandler
         var text = Encoding.UTF8.GetString(body);
         ValidateBodies.Add(text);
         var json = JsonNode.Parse(text)!;
+        var verbose = request.Content!.Headers.ContentType!.ToString().Contains("odata=verbose");
+        if (verbose != request.Headers.Accept.ToString().Contains("odata=verbose")) Problems.Add("Accept and Content-Type disagree");
+        var formValues = verbose ? json["formValues"]!["results"]!.AsArray() : json["formValues"]!.AsArray();
+        if (verbose && formValues.Any(f => f!["__metadata"]?["type"]?.GetValue<string>() != "SP.ListItemFormUpdateValue"))
+            Problems.Add("verbose formValues without SP.ListItemFormUpdateValue type");
+        var ignore = IgnoreAllValidate || (IgnoreCompactValidate && !verbose);
         if (json["bNewDocumentUpdate"]?.GetValue<bool>() != true) Problems.Add("bNewDocumentUpdate must be true (no new version)");
 
         // Like SharePoint: validate every field; only save when all of them are valid.
         var results = new JsonArray();
         var updates = new List<Action>();
-        foreach (var fv in json["formValues"]!.AsArray())
+        foreach (var fv in formValues)
         {
             var field = fv!["FieldName"]!.GetValue<string>();
             var value = fv["FieldValue"]!.GetValue<string>();
@@ -289,9 +302,11 @@ public sealed class FakeGraph : HttpMessageHandler
             });
         }
 
-        if (results.All(r => r!["HasException"]!.GetValue<bool>() == false))
+        if (!ignore && results.All(r => r!["HasException"]!.GetValue<bool>() == false))
             foreach (var u in updates) u();
-        return Json(new JsonObject { ["value"] = results });
+        return verbose
+            ? Json(new JsonObject { ["d"] = new JsonObject { ["ValidateUpdateListItem"] = new JsonObject { ["results"] = results } } })
+            : Json(new JsonObject { ["value"] = results });
     }
 
     private DateTime? ParseSiteDate(string value)

@@ -20,6 +20,7 @@ namespace CopyPilot.Core.SharePoint;
 public sealed partial class SharePointFileTree
 {
     private const int VerifyFirstItems = 25;
+    private const int MaxFailureDiagnostics = 8;
     private static readonly TimeSpan DateTolerance = TimeSpan.FromSeconds(61);
 
     private readonly ConcurrentDictionary<string, Task<WebRegional>> _regional = new(StringComparer.OrdinalIgnoreCase);
@@ -63,7 +64,9 @@ public sealed partial class SharePointFileTree
     {
         public required CultureInfo Culture { get; init; }
         public ConcurrentDictionary<DateTime, TimeSpan?> DayOffsets { get; } = new();
-        public int FormatIndex;
+        public int FormatIndex; // index into WriteStrategies
+        public int Diagnosed;
+        public int FailureDiagnostics;
         public int Verified;
     }
 
@@ -154,16 +157,17 @@ public sealed partial class SharePointFileTree
 
         while (true)
         {
-            var format = regional.FormatIndex;
+            var strategyIndex = regional.FormatIndex;
+            var strategy = WriteStrategies[strategyIndex];
             var values = new List<(string Field, string Value)>
             {
-                ("Created", FormatSiteDate(regional, createdLocal, format)),
-                ("Modified", FormatSiteDate(regional, modifiedLocal, format)),
+                ("Created", FormatSiteDate(regional, createdLocal, strategy.DateFormat)),
+                ("Modified", FormatSiteDate(regional, modifiedLocal, strategy.DateFormat)),
             };
             if (author != null) values.Add(("Author", PersonValue(author)));
             if (editor != null) values.Add(("Editor", PersonValue(editor)));
 
-            var errors = await ValidateUpdateAsync(item, values, ct).ConfigureAwait(false);
+            var (errors, answer) = await ValidateUpdateAsync(item, values, strategy.Verbose, ct).ConfigureAwait(false);
 
             // A person that no longer exists: keep the uploader as author, but still set the dates.
             var personErrors = errors.Where(e => e.Field is "Author" or "Editor").ToList();
@@ -179,29 +183,42 @@ public sealed partial class SharePointFileTree
                 values = values.Where(v => v.Field is "Created" or "Modified"
                                            || (v.Field == "Author" && author != null)
                                            || (v.Field == "Editor" && editor != null)).ToList();
-                errors = await ValidateUpdateAsync(item, values, ct).ConfigureAwait(false);
+                (errors, answer) = await ValidateUpdateAsync(item, values, strategy.Verbose, ct).ConfigureAwait(false);
             }
 
             var dateErrors = errors.Where(e => e.Field is "Created" or "Modified").ToList();
             var mismatch = false;
-            if (dateErrors.Count == 0 && (regional.Verified < VerifyFirstItems))
+            FileMetadata? stored = null;
+            if (dateErrors.Count == 0 && regional.Verified < VerifyFirstItems)
             {
-                var stored = await ReadFieldsAsync(item, ct).ConfigureAwait(false);
+                stored = await ReadFieldsAsync(item, ct).ConfigureAwait(false);
                 mismatch = !Close(stored.CreatedUtc, createdUtc) || !Close(stored.ModifiedUtc, modifiedUtc);
                 if (!mismatch) Interlocked.Increment(ref regional.Verified);
             }
 
+            // What was sent, what SharePoint answered and what the item holds now: shown for the first item,
+            // and whenever the dates did not stick, so a problem on a real site can be diagnosed from the log.
+            var sent = string.Join(", ", values.Select(v => $"{v.Field}='{v.Value}'"));
+            var now = stored == null ? "" : $"; item now: Created={Show(stored.CreatedUtc)}, Modified={Show(stored.ModifiedUtc)}, Created By={stored.CreatedBy}, Modified By={stored.ModifiedBy}";
+            var expected = $"; expected Created={Show(createdUtc)}, Modified={Show(modifiedUtc)}";
+            var failed = dateErrors.Count > 0 || mismatch;
+            if (Interlocked.Exchange(ref regional.Diagnosed, 1) == 0
+                || (failed && Interlocked.Increment(ref regional.FailureDiagnostics) <= MaxFailureDiagnostics))
+                _log($"INFO: Diagnostics for {path} ({DescribeStrategy(regional, strategyIndex)}): sent {sent}; SharePoint answered {answer}{now}{expected}");
+
             if (dateErrors.Count == 0 && !mismatch) return author != null || editor != null;
 
-            // The site did not understand this date format (or understood it differently): try the next one.
-            if (format + 1 < DateFormatCount)
+            // The site did not accept or store the values with this method: try the next one.
+            if (strategyIndex + 1 < WriteStrategies.Length)
             {
-                if (Interlocked.CompareExchange(ref regional.FormatIndex, format + 1, format) == format)
-                    _log($"INFO: SharePoint did not accept the {DescribeFormat(regional, format)} date format; switching to {DescribeFormat(regional, format + 1)}.");
+                if (Interlocked.CompareExchange(ref regional.FormatIndex, strategyIndex + 1, strategyIndex) == strategyIndex)
+                    _log($"INFO: SharePoint did not store the values with {DescribeStrategy(regional, strategyIndex)}; trying {DescribeStrategy(regional, strategyIndex + 1)}.");
                 continue;
             }
 
-            var detail = dateErrors.Count > 0 ? string.Join("; ", dateErrors.Select(e => $"{e.Field}: {e.Message}")) : "the stored dates differ from the source";
+            var detail = dateErrors.Count > 0
+                ? string.Join("; ", dateErrors.Select(e => $"{e.Field}: {e.Message}"))
+                : "SharePoint reported success but kept other values";
             throw new IOException($"the dates could not be set ({detail}).");
         }
     }
@@ -211,25 +228,59 @@ public sealed partial class SharePointFileTree
 
     private static string PersonValue(string loginName) => "[{'Key':'" + loginName.Replace("'", "\\'") + "'}]";
 
-    private async Task<List<(string Field, string Message)>> ValidateUpdateAsync(ItemRef item, List<(string Field, string Value)> values,
-        CancellationToken ct)
+    /// <summary>
+    /// Calls ValidateUpdateListItem. Returns the fields that failed, and a short summary of SharePoint's answer.
+    /// An answer without per-field results is treated as a failure of every field (nothing was validated).
+    /// </summary>
+    private async Task<(List<(string Field, string Message)> Errors, string Answer)> ValidateUpdateAsync(ItemRef item,
+        List<(string Field, string Value)> values, bool verbose, CancellationToken ct)
     {
+        var formValues = values.Select(v =>
+        {
+            var o = new JsonObject();
+            if (verbose) o["__metadata"] = new JsonObject { ["type"] = "SP.ListItemFormUpdateValue" };
+            o["FieldName"] = v.Field;
+            o["FieldValue"] = v.Value;
+            return (JsonNode)o;
+        }).ToArray();
         var body = new JsonObject
         {
-            ["formValues"] = new JsonArray(values.Select(v => (JsonNode)new JsonObject { ["FieldName"] = v.Field, ["FieldValue"] = v.Value }).ToArray()),
+            ["formValues"] = verbose ? new JsonObject { ["results"] = new JsonArray(formValues) } : new JsonArray(formValues),
             ["bNewDocumentUpdate"] = true,
         };
-        var json = await SharePointRestAsync(HttpMethod.Post, item.ItemApi + "/ValidateUpdateListItem", body, item.Resource, ct).ConfigureAwait(false);
-        var results = json?["value"] as JsonArray ?? json?["d"]?["ValidateUpdateListItem"]?["results"] as JsonArray ?? [];
-        return results
+        var json = await SharePointRestAsync(HttpMethod.Post, item.ItemApi + "/ValidateUpdateListItem", body, item.Resource, ct, verbose)
+            .ConfigureAwait(false);
+        var results = json?["value"] as JsonArray ?? json?["d"]?["ValidateUpdateListItem"]?["results"] as JsonArray;
+        if (results == null || results.Count == 0)
+        {
+            var raw = json?.ToJsonString() ?? "(empty)";
+            return (values.Select(v => (v.Field, "SharePoint returned no result for this field")).ToList(),
+                "without field results: " + (raw.Length > 300 ? raw[..300] + "…" : raw));
+        }
+
+        var errors = results
             .Where(r => r?["HasException"]?.GetValue<bool>() == true)
             .Select(r => (r!["FieldName"]?.GetValue<string>() ?? "?", r["ErrorMessage"]?.GetValue<string>() ?? "error"))
             .ToList();
+        var answer = string.Join(", ", results.Select(r =>
+            $"{r?["FieldName"]?.GetValue<string>()}={(r?["HasException"]?.GetValue<bool>() == true ? "error: " + r["ErrorMessage"]?.GetValue<string>() : "ok '" + r?["FieldValue"]?.GetValue<string>() + "'")}"));
+        return (errors, answer);
     }
+
+    private static string Show(DateTime? d) =>
+        d is { } v ? DateTime.SpecifyKind(v, DateTimeKind.Utc).ToString("yyyy-MM-dd HH:mm:ss'Z'", CultureInfo.InvariantCulture) : "(none)";
 
     // ---- Site regional settings ---------------------------------------------------------------
 
-    private const int DateFormatCount = 2;
+    /// <summary>
+    /// The ways to send the values, tried in order until SharePoint stores them: the compact JSON body
+    /// (odata=nometadata, as in Power Automate) and the verbose body with explicit SP.ListItemFormUpdateValue types,
+    /// each with the site's own date format and with ISO dates.
+    /// </summary>
+    private static readonly (bool Verbose, int DateFormat)[] WriteStrategies = [(false, 0), (false, 1), (true, 0), (true, 1)];
+
+    private static string DescribeStrategy(WebRegional r, int index) =>
+        $"{DescribeFormat(r, WriteStrategies[index].DateFormat)} dates, {(WriteStrategies[index].Verbose ? "verbose" : "compact")} request";
 
     /// <summary>0 = the site's own short date and time format (like the UI), 1 = ISO "yyyy-MM-dd HH:mm:ss".</summary>
     private static string FormatSiteDate(WebRegional r, DateTime siteLocal, int format) => format == 0
@@ -303,16 +354,18 @@ public sealed partial class SharePointFileTree
             ids["listItemId"]?.GetValue<string>() ?? throw new IOException("Graph did not return the list item id."));
     }
 
-    private async Task<JsonNode?> SharePointRestAsync(HttpMethod method, string url, JsonNode? body, string resource, CancellationToken ct)
+    private async Task<JsonNode?> SharePointRestAsync(HttpMethod method, string url, JsonNode? body, string resource, CancellationToken ct,
+        bool verbose = false)
     {
+        var mediaType = verbose ? "application/json;odata=verbose" : "application/json;odata=nometadata";
         using var response = await SendAsync(() =>
         {
             var req = new HttpRequestMessage(method, url);
-            req.Headers.Accept.ParseAdd("application/json;odata=nometadata");
+            req.Headers.Accept.ParseAdd(mediaType);
             if (body != null)
             {
                 req.Content = new StringContent(body.ToJsonString(), Encoding.UTF8);
-                req.Content.Headers.ContentType = System.Net.Http.Headers.MediaTypeHeaderValue.Parse("application/json;odata=nometadata");
+                req.Content.Headers.ContentType = System.Net.Http.Headers.MediaTypeHeaderValue.Parse(mediaType);
             }
 
             return req;
