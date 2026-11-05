@@ -82,7 +82,9 @@ The routes are the same as for SFTP:
 - **Site URL**, for example `https://contoso.sharepoint.com/sites/Team`. You can also paste the URL of a library
   or a OneDrive (`https://contoso-my.sharepoint.com/personal/...`).
 - **Document library**, by display name or URL name. Empty means the site's default library.
-- **Folder**, with wildcards allowed.
+- **Folder**, with wildcards allowed. Leave it empty to copy the whole library: its contents go straight into the
+  destination. A named folder becomes a sub-folder of the destination, as in AzCopy; set `--as-subdir=false` to copy
+  only its contents.
 
 **One-time setup in Microsoft Entra ID.** Create an *app registration* and enter its Application (client) ID in CopyPilot.
 - **Sign in as me (browser or device code):** add the delegated Microsoft Graph permission `Sites.ReadWrite.All`.

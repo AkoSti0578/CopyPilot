@@ -409,3 +409,118 @@ public class SharePointTests
         Assert.Empty(graph.Problems);
     }
 }
+
+public class LibraryRootTests
+{
+    private static LocationSpec Library(string path) => new()
+    {
+        Kind = LocationKind.SharePoint,
+        SiteUrl = "https://contoso.sharepoint.com/sites/Team",
+        Library = "Documents",
+        ClientId = "00000000-0000-0000-0000-000000000001",
+        Path = path,
+    };
+
+    private static async Task<int> Run(FakeGraph graph, LocationSpec src, LocationSpec dst, Dictionary<string, string>? options = null)
+    {
+        var plan = TransferPlanner.Plan(new CommandRequest
+        {
+            Command = CommandCatalog.Get(CommandCatalog.Copy), Source = src, Destination = dst,
+            Options = options ?? new Dictionary<string, string> { ["recursive"] = "true" },
+        });
+        Assert.True(plan.IsValid, string.Join(", ", plan.Errors));
+        var runner = new TransferRunner(new AzCopyRunner())
+        {
+            GraphHandler = graph, GraphBaseUrl = FakeGraph.Base, GraphTokenProviderFactory = (_, _) => new FakeTokens(),
+        };
+        return await runner.RunAsync(plan, null, new Dictionary<string, string>(), (_, _) => { }, CancellationToken.None);
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("/")]
+    public async Task Whole_library_is_copied_without_an_extra_root_folder(string rootPath)
+    {
+        // Graph names a library's root item "root"; that must never become a folder at the destination.
+        var graph = new FakeGraph();
+        graph.Put("a.txt", "a");
+        graph.Put("Projects/b.txt", "b");
+        using var local = new TempDir();
+
+        Assert.Equal(0, await Run(graph, Library(rootPath), new LocationSpec { LocalPath = local.Path }));
+
+        Assert.Equal(["Projects/b.txt", "a.txt"], local.Files());
+    }
+
+    [Fact]
+    public async Task Library_to_library_lands_in_the_destination_folder_itself()
+    {
+        var graph = new FakeGraph();
+        graph.Put("a.txt", "a");
+        graph.Put("Projects/b.txt", "b");
+
+        Assert.Equal(0, await Run(graph, Library(""), Library("Archive")));
+
+        Assert.True(graph.Items.ContainsKey("Archive/a.txt"));
+        Assert.True(graph.Items.ContainsKey("Archive/Projects/b.txt"));
+        Assert.DoesNotContain(graph.Items.Keys, k => k.Contains("root", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public async Task Named_folder_still_follows_as_subdir()
+    {
+        var graph = new FakeGraph();
+        graph.Put("Projects/b.txt", "b");
+        using var withSubdir = new TempDir();
+        using var withoutSubdir = new TempDir();
+
+        Assert.Equal(0, await Run(graph, Library("Projects"), new LocationSpec { LocalPath = withSubdir.Path }));
+        Assert.Equal(0, await Run(graph, Library("Projects"), new LocationSpec { LocalPath = withoutSubdir.Path },
+            new Dictionary<string, string> { ["recursive"] = "true", ["as-subdir"] = "false" }));
+
+        Assert.Equal(["Projects/b.txt"], withSubdir.Files());
+        Assert.Equal(["b.txt"], withoutSubdir.Files());
+    }
+}
+
+/// <summary>SharePoint library root → cloud via the staging folder, with a fake azcopy (Linux/macOS only).</summary>
+public class LibraryRootToCloudTests
+{
+    [Fact]
+    public async Task Whole_library_to_cloud_uploads_contents_not_the_staging_folder()
+    {
+        if (OperatingSystem.IsWindows()) return;
+        var graph = new FakeGraph();
+        graph.Put("a.txt", "a");
+        graph.Put("Projects/b.txt", "b");
+        using var tools = new TempDir();
+        using var cloud = new TempDir();
+        using var stage = new TempDir();
+        var exe = Path.Combine(tools.Path, "azcopy");
+        File.WriteAllText(exe, "#!/bin/sh\necho \"ARGS: $*\"\ncp -rp $2 \"" + cloud.Path + "\"/ || exit 1\necho \"Final Job Status: Completed\"\n");
+        if (!OperatingSystem.IsWindows())
+            File.SetUnixFileMode(exe, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+
+        var plan = TransferPlanner.Plan(new CommandRequest
+        {
+            Command = CommandCatalog.Get(CommandCatalog.Copy),
+            Source = new LocationSpec
+            {
+                Kind = LocationKind.SharePoint, SiteUrl = "https://contoso.sharepoint.com/sites/Team", Library = "Documents",
+                ClientId = "00000000-0000-0000-0000-000000000001", Path = "",
+            },
+            Destination = new LocationSpec { Kind = LocationKind.CustomUrl, Url = "https://acct.blob.core.windows.net/c" },
+            Options = new Dictionary<string, string> { ["recursive"] = "true", ["sftp-staging-folder"] = stage.Path },
+        });
+        Assert.True(plan.IsValid, string.Join(", ", plan.Errors));
+        var log = new List<string>();
+        var runner = new TransferRunner(new AzCopyRunner())
+        {
+            GraphHandler = graph, GraphBaseUrl = FakeGraph.Base, GraphTokenProviderFactory = (_, _) => new FakeTokens(),
+        };
+        Assert.Equal(0, await runner.RunAsync(plan, exe, new Dictionary<string, string>(), (l, _) => log.Add(l), CancellationToken.None));
+
+        Assert.Equal(["Projects/b.txt", "a.txt"], cloud.Files());
+        Assert.Contains(log, l => l.StartsWith("ARGS: copy ") && l.Contains("/* https://acct.blob.core.windows.net/c"));
+    }
+}

@@ -114,7 +114,8 @@ public sealed class TreeCopier(Action<string> output)
 
         output($"INFO: Scanning {src.DisplayName} {srcPath} …");
         await WalkAsync(src, srcPath, "", null, include, exclude, true, files, dirs, ct).ConfigureAwait(false);
-        var prefix = o.AsSubdir && !o.SyncMode ? stat.Name : "";
+        // --as-subdir keeps a named folder's name; the root of a library, share or home folder has none.
+        var prefix = o.AsSubdir && !o.SyncMode && !IsRootName(stat.Name) ? stat.Name : "";
         if (prefix.Length > 0)
         {
             files = files.Select(f => new SelectedFile(f.Entry, prefix + "/" + f.RelativePath)).ToList();
@@ -315,6 +316,8 @@ public sealed class TreeCopier(Action<string> output)
             }
         }
     }
+
+    private static bool IsRootName(string name) => name.Trim('/', '\\') is "" or "." or "~";
 
     private static bool Matches(string name, List<Regex> include, List<Regex> exclude) =>
         (include.Count == 0 || include.Any(r => r.IsMatch(name))) && !exclude.Any(r => r.IsMatch(name));

@@ -187,7 +187,10 @@ public sealed class SharePointFileTree : IFileTree
     public async Task<FileEntry?> StatAsync(string path, CancellationToken ct)
     {
         var item = await GetJsonAsync(ItemUrl(path) + "?$select=" + ItemSelect, ct).ConfigureAwait(false);
-        return item == null ? null : ToEntry(item, path.Trim('/'));
+        if (item == null) return null;
+        var entry = ToEntry(item, path.Trim('/'));
+        // Graph calls the library's root item "root"; it is not a folder name and must never appear at the destination.
+        return path.Trim('/').Length == 0 ? entry with { Name = "" } : entry;
     }
 
     public async Task<IReadOnlyList<FileEntry>> ListAsync(string directory, CancellationToken ct)
