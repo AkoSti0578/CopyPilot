@@ -34,8 +34,12 @@ public interface IFileTree : IDisposable
     /// <summary>Metadata of a source file (null when the tree has none beyond <see cref="FileEntry"/>).</summary>
     Task<FileMetadata?> GetMetadataAsync(FileEntry file, CancellationToken ct) => Task.FromResult<FileMetadata?>(null);
 
-    /// <summary>Applies the source's metadata to a file that was just written. Problems are reported, not thrown.</summary>
-    Task ApplyMetadataAsync(string path, FileEntry source, FileMetadata? metadata, CancellationToken ct) => Task.CompletedTask;
+    /// <summary>
+    /// Applies the source's metadata to a destination file. Problems are reported, not thrown.
+    /// With <paramref name="onlyIfDifferent"/> (a file skipped by sync) the current values are read first and only
+    /// written when they differ, so already migrated files are corrected without rewriting everything each run.
+    /// </summary>
+    Task ApplyMetadataAsync(string path, FileEntry source, FileMetadata? metadata, bool onlyIfDifferent, CancellationToken ct) => Task.CompletedTask;
 
     string Combine(string directory, string name);
     string GetName(string path);

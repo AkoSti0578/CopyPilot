@@ -25,6 +25,10 @@ public sealed partial class SharePointFileTree
     private readonly ConcurrentDictionary<string, Task<WebRegional>> _regional = new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> _warned = new(StringComparer.Ordinal);
     private int _metadataFailures;
+    private int _datesSet;
+    private int _authorsSet;
+    private int _corrected;
+    private int _alreadyCorrect;
 
     /// <summary>Which list item fields to set on files uploaded to this library.</summary>
     public SharePointMetadataMode MetadataMode { get; set; } = SharePointMetadataMode.None;
@@ -36,6 +40,18 @@ public sealed partial class SharePointFileTree
 
     /// <summary>Files whose metadata could not (fully) be applied.</summary>
     public int MetadataFailures => _metadataFailures;
+
+    /// <summary>Files whose Created/Modified were written.</summary>
+    public int MetadataDatesSet => _datesSet;
+
+    /// <summary>Files whose Created By and/or Modified By were written.</summary>
+    public int MetadataAuthorsSet => _authorsSet;
+
+    /// <summary>Of those: files skipped by sync whose columns were corrected.</summary>
+    public int MetadataCorrected => _corrected;
+
+    /// <summary>Files skipped by sync whose columns were already right.</summary>
+    public int MetadataAlreadyCorrect => _alreadyCorrect;
 
     private sealed record ItemRef(string WebUrl, string ListId, string ItemId)
     {
@@ -81,7 +97,7 @@ public sealed partial class SharePointFileTree
 
     // ---- Writing (destination) ----------------------------------------------------------------
 
-    public async Task ApplyMetadataAsync(string path, FileEntry source, FileMetadata? metadata, CancellationToken ct)
+    public async Task ApplyMetadataAsync(string path, FileEntry source, FileMetadata? metadata, bool onlyIfDifferent, CancellationToken ct)
     {
         if (MetadataMode == SharePointMetadataMode.None || metadata == null) return;
         try
@@ -100,7 +116,23 @@ public sealed partial class SharePointFileTree
                     WarnOnce("noauthors", "INFO: The source has no SharePoint authors; only Created and Modified are set (Created By / Modified By stay the account that uploaded).");
             }
 
-            await SetFieldsAsync(item, regional, path, created, modified, author, editor, ct).ConfigureAwait(false);
+            if (onlyIfDifferent)
+            {
+                var current = await ReadFieldsAsync(item, ct).ConfigureAwait(false);
+                var same = Close(current.CreatedUtc, created) && Close(current.ModifiedUtc, modified)
+                           && (author == null || string.Equals(current.CreatedBy, author, StringComparison.OrdinalIgnoreCase))
+                           && (editor == null || string.Equals(current.ModifiedBy, editor, StringComparison.OrdinalIgnoreCase));
+                if (same)
+                {
+                    Interlocked.Increment(ref _alreadyCorrect);
+                    return;
+                }
+            }
+
+            var authorsSet = await SetFieldsAsync(item, regional, path, created, modified, author, editor, ct).ConfigureAwait(false);
+            Interlocked.Increment(ref _datesSet);
+            if (authorsSet) Interlocked.Increment(ref _authorsSet);
+            if (onlyIfDifferent) Interlocked.Increment(ref _corrected);
         }
         catch (OperationCanceledException)
         {
@@ -113,7 +145,8 @@ public sealed partial class SharePointFileTree
         }
     }
 
-    private async Task SetFieldsAsync(ItemRef item, WebRegional regional, string path, DateTime createdUtc, DateTime modifiedUtc,
+    /// <returns>True when at least one author (Created By / Modified By) was set.</returns>
+    private async Task<bool> SetFieldsAsync(ItemRef item, WebRegional regional, string path, DateTime createdUtc, DateTime modifiedUtc,
         string? author, string? editor, CancellationToken ct)
     {
         var createdLocal = await ToSiteTimeAsync(item, regional, createdUtc, ct).ConfigureAwait(false);
@@ -158,7 +191,7 @@ public sealed partial class SharePointFileTree
                 if (!mismatch) Interlocked.Increment(ref regional.Verified);
             }
 
-            if (dateErrors.Count == 0 && !mismatch) return;
+            if (dateErrors.Count == 0 && !mismatch) return author != null || editor != null;
 
             // The site did not understand this date format (or understood it differently): try the next one.
             if (format + 1 < DateFormatCount)

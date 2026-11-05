@@ -23,12 +23,13 @@ public class SharePointMetadataTests
         Path = path,
     };
 
-    private static async Task<(int Code, List<string> Log, FakeTokens Tokens)> Run(FakeGraph graph, LocationSpec src, LocationSpec dst, string mode)
+    private static async Task<(int Code, List<string> Log, FakeTokens Tokens)> Run(FakeGraph graph, LocationSpec src, LocationSpec dst, string mode,
+        string command = CommandCatalog.Copy)
     {
         var tokens = new FakeTokens();
         var plan = TransferPlanner.Plan(new CommandRequest
         {
-            Command = CommandCatalog.Get(CommandCatalog.Copy),
+            Command = CommandCatalog.Get(command),
             Source = src,
             Destination = dst,
             Options = new Dictionary<string, string> { ["recursive"] = "true", ["sharepoint-preserve-metadata"] = mode },
@@ -147,6 +148,46 @@ public class SharePointMetadataTests
         Assert.Equal("content", graph.Text("out/x.txt"));
         Assert.Contains(log, l => l.StartsWith("WARNING: could not set Created/Modified") && l.Contains("AllSites.Write"));
         Assert.Contains(log, l => l.Contains("could not be set on 1 file(s)"));
+    }
+
+    [Fact]
+    public async Task Sync_sets_metadata_on_files_that_were_already_migrated()
+    {
+        // First migration without the option: the library shows the uploader and the upload time.
+        var graph = new FakeGraph();
+        graph.KnownUsers.Add(Alice);
+        graph.Put("src/report.docx", "report", new DateTime(2024, 2, 3, 10, 15, 0, DateTimeKind.Utc));
+        var source = graph.Items["src/report.docx"];
+        source.ItemCreated = new DateTime(2024, 1, 2, 9, 0, 0, DateTimeKind.Utc);
+        source.ItemModified = new DateTime(2024, 2, 3, 10, 15, 0, DateTimeKind.Utc);
+        source.Author = source.Editor = Alice;
+        Assert.Equal(0, (await Run(graph, Library("src"), Library("dst"), "none", CommandCatalog.Sync)).Code);
+        Assert.Equal(FakeGraph.Uploader, graph.Items["dst/report.docx"].Author);
+
+        // Sync again with the option: the file is unchanged (skipped), but its columns must still be corrected.
+        var (code, log, _) = await Run(graph, Library("src"), Library("dst"), "dates-and-authors", CommandCatalog.Sync);
+        Assert.Equal(0, code);
+        var copy = graph.Items["dst/report.docx"];
+        Assert.Equal(Alice, copy.Author);
+        Assert.Equal(Alice, copy.Editor);
+        Near(source.ItemCreated, copy.ItemCreated);
+        Near(source.ItemModified, copy.ItemModified);
+        Assert.Contains(log, l => l.Contains("1 file(s)") && l.Contains("Created By"));
+
+        // A third sync finds nothing to correct and does not write again.
+        var writes = graph.ValidateBodies.Count;
+        Assert.Equal(0, (await Run(graph, Library("src"), Library("dst"), "dates-and-authors", CommandCatalog.Sync)).Code);
+        Assert.Equal(writes, graph.ValidateBodies.Count);
+    }
+
+    [Fact]
+    public async Task Says_which_account_appears_when_the_option_is_off()
+    {
+        var graph = new FakeGraph();
+        using var local = new TempDir();
+        local.Write("x.txt", "x");
+        var (_, log, _) = await Run(graph, new LocationSpec { LocalPath = Path.Combine(local.Path, "x.txt") }, Library("out/"), "none");
+        Assert.Contains(log, l => l.Contains("sharepoint-preserve-metadata"));
     }
 
     [Fact]

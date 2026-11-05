@@ -128,6 +128,9 @@ How it works:
   SharePoint itself convert UTC to site time (daylight-saving switches included), and reads the first items back to
   verify. If the site does not understand its own short format, CopyPilot switches to ISO (`yyyy-MM-dd HH:mm:ss`)
   automatically.
+- **Sync also corrects files that are already there.** Files that are unchanged (and therefore not uploaded again) get
+  their columns checked, and are only rewritten when they differ. Running a sync with the option on fixes a migration
+  that was done before the option was enabled. A summary at the end shows how many files were set or corrected.
 - If an author no longer exists, the uploading account is kept for that field and the dates are still set. A warning
   names the account.
 - If the columns cannot be set (for example because of a missing permission), the file is still copied. A warning and

@@ -60,7 +60,19 @@ public sealed class TransferRunner(AzCopyRunner azCopy)
             var tokens = GraphTokenProviderFactory?.Invoke(spec, output) ?? new MsalGraphTokenProvider(spec, TokenCacheFile, output);
             var sp = await SharePointFileTree.ConnectAsync(spec, tokens, output, ct, GraphHandler, GraphBaseUrl).ConfigureAwait(false);
             if (SharePointChunkSize is { } chunk) sp.ChunkSize = chunk;
-            if (isDestination) sp.MetadataMode = plan.SharePointMetadata;
+            if (isDestination)
+            {
+                sp.MetadataMode = plan.SharePointMetadata;
+                output(plan.SharePointMetadata switch
+                {
+                    SharePointMetadataMode.None =>
+                        "INFO: sharepoint-preserve-metadata is off: SharePoint shows the account running CopyPilot as Created By / Modified By, and the upload time as Modified. Set it to 'dates' or 'dates-and-authors' on the Options tab to keep the source's values.",
+                    SharePointMetadataMode.Dates =>
+                        "INFO: sharepoint-preserve-metadata = dates: Created and Modified are taken from the source; Created By / Modified By stay the account running CopyPilot.",
+                    _ =>
+                        "INFO: sharepoint-preserve-metadata = dates-and-authors: Created, Modified, Created By and Modified By are taken from the source (also for files that are already up to date).",
+                });
+            }
             else if (plan.SharePointMetadata == SharePointMetadataMode.DatesAndAuthors && plan.Request.Destination?.IsSharePoint == true)
                 sp.ReadAuthors = true;
             return sp;
@@ -83,7 +95,11 @@ public sealed class TransferRunner(AzCopyRunner azCopy)
     /// <summary>Files are copied even when their SharePoint columns could not be set; say how many.</summary>
     private static void ReportMetadata(IFileTree dst, Action<string> output)
     {
-        if (dst is SharePointFileTree { MetadataFailures: > 0 } sp)
+        if (dst is not SharePointFileTree { MetadataMode: not SharePointMetadataMode.None } sp) return;
+        output($"INFO: SharePoint columns: Created/Modified set on {sp.MetadataDatesSet} file(s), Created By/Modified By on {sp.MetadataAuthorsSet} file(s)"
+               + (sp.MetadataCorrected > 0 ? $"; {sp.MetadataCorrected} already migrated file(s) corrected" : "")
+               + (sp.MetadataAlreadyCorrect > 0 ? $"; {sp.MetadataAlreadyCorrect} already correct" : "") + ".");
+        if (sp.MetadataFailures > 0)
             output($"WARNING: Created/Modified could not be set on {sp.MetadataFailures} file(s); the files themselves were copied. See the warnings above.");
     }
 

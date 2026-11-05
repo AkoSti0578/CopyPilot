@@ -229,7 +229,13 @@ public sealed class TreeCopier(Action<string> output)
         var existing = await dst.StatAsync(target, ct).ConfigureAwait(false);
         if (existing?.IsDirectory == true)
             throw new IOException($"'{target}' is a directory at the destination.");
-        if (ShouldSkip(entry, existing, o, dst.HasExactSizes && src.HasExactSizes)) return CopyOutcome.Skipped;
+        if (ShouldSkip(entry, existing, o, dst.HasExactSizes && src.HasExactSizes))
+        {
+            // The content is up to date, but its SharePoint columns may not be (e.g. migrated before the option was on).
+            if (dst.WantsSourceMetadata && !o.DryRun)
+                await ApplyMetadataAsync(src, entry, dst, target, onlyIfDifferent: true, ct).ConfigureAwait(false);
+            return CopyOutcome.Skipped;
+        }
 
         if (o.DryRun)
         {
@@ -253,12 +259,16 @@ public sealed class TreeCopier(Action<string> output)
             await dst.SetLastWriteTimeUtcAsync(target, entry.LastWriteUtc, ct).ConfigureAwait(false);
 
         if (dst.WantsSourceMetadata)
-        {
-            var metadata = await src.GetMetadataAsync(entry, ct).ConfigureAwait(false)
-                           ?? new FileMetadata(null, entry.LastWriteUtc, null, null);
-            await dst.ApplyMetadataAsync(target, entry, metadata, ct).ConfigureAwait(false);
-        }
+            await ApplyMetadataAsync(src, entry, dst, target, onlyIfDifferent: false, ct).ConfigureAwait(false);
         return CopyOutcome.Copied;
+    }
+
+    private static async Task ApplyMetadataAsync(IFileTree src, FileEntry entry, IFileTree dst, string target, bool onlyIfDifferent,
+        CancellationToken ct)
+    {
+        var metadata = await src.GetMetadataAsync(entry, ct).ConfigureAwait(false)
+                       ?? new FileMetadata(null, entry.LastWriteUtc, null, null);
+        await dst.ApplyMetadataAsync(target, entry, metadata, onlyIfDifferent, ct).ConfigureAwait(false);
     }
 
     /// <summary>Sync: deletes destination files whose relative path is not in <paramref name="keep"/>.</summary>
