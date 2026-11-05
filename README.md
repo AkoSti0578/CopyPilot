@@ -97,8 +97,9 @@ The routes are the same as for SFTP:
 **Behaviour**
 - **Large files:** uploaded in 10 MiB chunks through resumable upload sessions.
 - **Throttling:** when SharePoint throttles (429/503), CopyPilot waits as instructed and retries.
-- **What is copied:** file contents and last-modified times. Authors ("Created by"/"Modified by"), version history,
-  permissions and extra columns are **not** copied. For full-fidelity migrations use Microsoft's SharePoint Migration Tool.
+- **What is copied:** file contents and last-modified times. With **`sharepoint-preserve-metadata`** (Options tab) the library's
+  visible columns are set too (see below). Version history, permissions and extra columns are **not** copied.
+  For full-fidelity migrations use Microsoft's SharePoint Migration Tool.
 - **Sync** compares last-modified times only. SharePoint can change the size of Office files when it adds metadata,
   so sizes are not reliable.
 - **Names SharePoint does not accept** are reported as errors, and the rest of the job continues:
@@ -108,6 +109,35 @@ The routes are the same as for SFTP:
   - paths over 400 characters
 - **Deleting with Sync:** `--delete-destination` moves files to the site's recycle bin.
 - **Limitations:** only the global Microsoft 365 cloud is supported (`graph.microsoft.com`).
+
+### Created, Modified and authors (`sharepoint-preserve-metadata`)
+
+By default the library shows the upload time in *Modified* and the uploading account in *Created By* / *Modified By*.
+Set **`sharepoint-preserve-metadata`** to change that:
+
+| Value | Sets |
+| --- | --- |
+| `none` (default) | nothing extra |
+| `dates` | **Created** and **Modified**, from the source (local files: creation time and last-modified time) |
+| `dates-and-authors` | also **Created By** and **Modified By**; the source must be SharePoint, normally in the same tenant |
+
+How it works:
+- CopyPilot calls SharePoint's `ValidateUpdateListItem` with `bNewDocumentUpdate=true` after each upload, so no extra
+  version is created.
+- SharePoint reads these dates in the **site's regional format and time zone**. CopyPilot reads the site's locale, lets
+  SharePoint itself convert UTC to site time (daylight-saving switches included), and reads the first items back to
+  verify. If the site does not understand its own short format, CopyPilot switches to ISO (`yyyy-MM-dd HH:mm:ss`)
+  automatically.
+- If an author no longer exists, the uploading account is kept for that field and the dates are still set. A warning
+  names the account.
+- If the columns cannot be set (for example because of a missing permission), the file is still copied. A warning and
+  a count at the end say so.
+
+Permissions:
+- **Sign in as me:** add the delegated **SharePoint** permission `AllSites.Write` to the app registration, next to the
+  Graph permission.
+- **App only:** use a **certificate**. SharePoint's REST API refuses app-only tokens obtained with a client secret, so
+  CopyPilot blocks that combination up front.
   Remove, List and Make are not available for SharePoint.
 
 ## Install

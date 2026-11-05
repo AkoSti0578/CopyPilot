@@ -24,7 +24,29 @@ public sealed class FakeGraph : HttpMessageHandler
         public bool IsFolder;
         public byte[] Data = [];
         public DateTime Modified = DateTime.UtcNow;
+
+        // SharePoint list item fields (what the library shows).
+        public int ListItemId;
+        public DateTime ItemCreated = DateTime.UtcNow;
+        public DateTime ItemModified = DateTime.UtcNow;
+        public string Author = Uploader;
+        public string Editor = Uploader;
     }
+
+    public const string SpToken = "sp-token";
+    public const string ListId = "11111111-2222-3333-4444-555555555555";
+    public const string Uploader = "i:0#.f|membership|copypilot@contoso.com";
+
+    /// <summary>The site's regional settings, and how the fake parses dates (normally the same culture).</summary>
+    public int SiteLcid { get; set; } = 1043;
+    public string? ParseCultureOverride { get; set; }
+    public bool AcceptIsoOnly { get; set; }
+    public bool RestForbidden { get; set; }
+    public HashSet<string> KnownUsers { get; } = new(StringComparer.OrdinalIgnoreCase) { Uploader };
+    public int UtcToLocalCalls { get; private set; }
+    public List<string> ValidateBodies { get; } = [];
+    private int _nextItemId;
+    private static readonly TimeZoneInfo SiteZone = TimeZoneInfo.FindSystemTimeZoneById("Europe/Amsterdam");
 
     /// <summary>Library content keyed by path ("" = root).</summary>
     public Dictionary<string, Node> Items { get; } = new(StringComparer.OrdinalIgnoreCase) { [""] = new Node { IsFolder = true } };
@@ -74,6 +96,13 @@ public sealed class FakeGraph : HttpMessageHandler
             if (auth != null) Problems.Add("token sent to download URL");
             var p = Uri.UnescapeDataString(url.AbsolutePath.Trim('/'));
             return new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(Items[p].Data) };
+        }
+
+        if (url.Host == "contoso.sharepoint.com")
+        {
+            if (auth != SpToken) return new HttpResponseMessage(HttpStatusCode.Unauthorized);
+            if (!request.Headers.Accept.ToString().Contains("odata=nometadata")) Problems.Add("REST call without odata=nometadata");
+            return SharePointRest(request, Uri.UnescapeDataString(url.PathAndQuery), body);
         }
 
         if (auth != Token) return new HttpResponseMessage(HttpStatusCode.Unauthorized);
@@ -181,9 +210,98 @@ public sealed class FakeGraph : HttpMessageHandler
         if (!isLast) return new HttpResponseMessage(HttpStatusCode.Accepted);
 
         Put(s.Path, "");
-        Items[s.Path] = new Node { Data = s.Data.ToArray(), Modified = s.Modified ?? DateTime.UtcNow };
+        Items[s.Path] = new Node { Data = s.Data.ToArray(), Modified = s.Modified ?? DateTime.UtcNow, ListItemId = ++_nextItemId };
         _sessions.Remove(id);
         return Json(ItemJson(s.Path, Items[s.Path]), HttpStatusCode.Created);
+    }
+
+    private Node? ByItemId(int id) => Items.Values.FirstOrDefault(n => n.ListItemId == id);
+
+    private static string Utc(DateTime d) => DateTime.SpecifyKind(d, DateTimeKind.Utc).ToString("yyyy-MM-dd'T'HH:mm:ss'Z'");
+
+    private HttpResponseMessage SharePointRest(HttpRequestMessage request, string path, byte[] body)
+    {
+        if (RestForbidden) return Error(HttpStatusCode.Forbidden, "accessDenied");
+        if (path == "/sites/Team/_api/web/RegionalSettings?$select=LocaleId") return Json(new JsonObject { ["LocaleId"] = SiteLcid });
+
+        var tz = System.Text.RegularExpressions.Regex.Match(path, @"^/sites/Team/_api/web/RegionalSettings/TimeZone/UTCToLocalTime\(@date\)\?@date='([^']+)'$");
+        if (tz.Success)
+        {
+            UtcToLocalCalls++;
+            var utc = DateTime.Parse(tz.Groups[1].Value, null, System.Globalization.DateTimeStyles.AdjustToUniversal);
+            return Json(new JsonObject { ["value"] = TimeZoneInfo.ConvertTimeFromUtc(utc, SiteZone).ToString("yyyy-MM-dd'T'HH:mm:ss") });
+        }
+
+        var item = System.Text.RegularExpressions.Regex.Match(path,
+            @"^/sites/Team/_api/web/lists\(guid'" + ListId + @"'\)/items\((\d+)\)(/ValidateUpdateListItem|\?\$select=Created,Modified,Author/Name,Editor/Name&\$expand=Author,Editor)$");
+        if (!item.Success) return Error(HttpStatusCode.NotFound, "notFoundInFake " + path);
+        var node = ByItemId(int.Parse(item.Groups[1].Value));
+        if (node == null) return Error(HttpStatusCode.NotFound, "itemNotFound");
+
+        if (request.Method == HttpMethod.Get)
+            return Json(new JsonObject
+            {
+                ["Created"] = Utc(node.ItemCreated), ["Modified"] = Utc(node.ItemModified),
+                ["Author"] = new JsonObject { ["Name"] = node.Author }, ["Editor"] = new JsonObject { ["Name"] = node.Editor },
+            });
+
+        var text = Encoding.UTF8.GetString(body);
+        ValidateBodies.Add(text);
+        var json = JsonNode.Parse(text)!;
+        if (json["bNewDocumentUpdate"]?.GetValue<bool>() != true) Problems.Add("bNewDocumentUpdate must be true (no new version)");
+
+        // Like SharePoint: validate every field; only save when all of them are valid.
+        var results = new JsonArray();
+        var updates = new List<Action>();
+        foreach (var fv in json["formValues"]!.AsArray())
+        {
+            var field = fv!["FieldName"]!.GetValue<string>();
+            var value = fv["FieldValue"]!.GetValue<string>();
+            string? error = null;
+            switch (field)
+            {
+                case "Created" or "Modified":
+                    if (ParseSiteDate(value) is { } local)
+                    {
+                        var utc = TimeZoneInfo.ConvertTimeToUtc(DateTime.SpecifyKind(local, DateTimeKind.Unspecified), SiteZone);
+                        updates.Add(field == "Created" ? () => node.ItemCreated = utc : () => node.ItemModified = utc);
+                    }
+                    else
+                    {
+                        error = "Invalid date/time value";
+                    }
+
+                    break;
+                case "Author" or "Editor":
+                    var m = System.Text.RegularExpressions.Regex.Match(value, @"^\[\{'Key':'(i:0#\.f\|membership\|[^']+)'\}\]$");
+                    if (!m.Success) error = "Invalid person value";
+                    else if (!KnownUsers.Contains(m.Groups[1].Value)) error = "The user does not exist or is not unique.";
+                    else updates.Add(field == "Author" ? () => node.Author = m.Groups[1].Value : () => node.Editor = m.Groups[1].Value);
+                    break;
+                default:
+                    error = "Unknown field";
+                    break;
+            }
+
+            results.Add(new JsonObject
+            {
+                ["ErrorMessage"] = error, ["FieldName"] = field, ["FieldValue"] = value, ["HasException"] = error != null, ["ItemId"] = node.ListItemId,
+            });
+        }
+
+        if (results.All(r => r!["HasException"]!.GetValue<bool>() == false))
+            foreach (var u in updates) u();
+        return Json(new JsonObject { ["value"] = results });
+    }
+
+    private DateTime? ParseSiteDate(string value)
+    {
+        if (DateTime.TryParseExact(value, "yyyy-MM-dd HH:mm:ss", System.Globalization.CultureInfo.InvariantCulture,
+                System.Globalization.DateTimeStyles.None, out var iso))
+            return iso;
+        if (AcceptIsoOnly) return null;
+        var culture = System.Globalization.CultureInfo.GetCultureInfo(ParseCultureOverride ?? System.Globalization.CultureInfo.GetCultureInfo(SiteLcid).Name);
+        return DateTime.TryParse(value, culture, System.Globalization.DateTimeStyles.None, out var d) ? d : null;
     }
 
     private static string Parent(string p)
@@ -192,13 +310,19 @@ public sealed class FakeGraph : HttpMessageHandler
         return i < 0 ? "" : p[..i];
     }
 
-    private static JsonObject ItemJson(string path, Node n)
+    private JsonObject ItemJson(string path, Node n)
     {
         var o = new JsonObject
         {
             ["id"] = path,
             ["name"] = path.Length == 0 ? "root" : path.Split('/')[^1],
             ["fileSystemInfo"] = new JsonObject { ["lastModifiedDateTime"] = n.Modified.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'") },
+        };
+        if (n.ListItemId == 0) n.ListItemId = ++_nextItemId;
+        o["createdDateTime"] = Utc(n.ItemCreated);
+        o["sharepointIds"] = new JsonObject
+        {
+            ["siteUrl"] = "https://contoso.sharepoint.com/sites/Team", ["listId"] = ListId, ["listItemId"] = n.ListItemId.ToString(),
         };
         if (n.IsFolder)
         {
@@ -223,7 +347,13 @@ public sealed class FakeGraph : HttpMessageHandler
 
 public sealed class FakeTokens : IGraphTokenProvider
 {
-    public Task<string> GetAccessTokenAsync(bool forceRefresh, CancellationToken ct) => Task.FromResult(FakeGraph.Token);
+    public List<string> Resources { get; } = [];
+
+    public Task<string> GetAccessTokenAsync(string resource, bool forceRefresh, CancellationToken ct)
+    {
+        lock (Resources) Resources.Add(resource);
+        return Task.FromResult(resource == "https://graph.microsoft.com" ? FakeGraph.Token : FakeGraph.SpToken);
+    }
 }
 
 public class SharePointTests

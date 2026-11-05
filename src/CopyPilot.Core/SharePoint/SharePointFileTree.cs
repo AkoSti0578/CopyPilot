@@ -23,9 +23,11 @@ public sealed class GraphException(HttpStatusCode status, string code, string me
 /// Uploads use upload sessions (resumable, in chunks) and store the source's last-modified time;
 /// throttling (429/503) is retried as instructed by Retry-After.
 /// </summary>
-public sealed class SharePointFileTree : IFileTree
+public sealed partial class SharePointFileTree : IFileTree
 {
     public const string DefaultGraphBase = "https://graph.microsoft.com/v1.0";
+
+    private const string GraphResource = MsalGraphTokenProvider.GraphResource;
 
     /// <summary>Upload chunks must be a multiple of 320 KiB.</summary>
     public const int ChunkUnit = 320 * 1024;
@@ -230,7 +232,7 @@ public sealed class SharePointFileTree : IFileTree
                 ["folder"] = new JsonObject(),
                 ["@microsoft.graph.conflictBehavior"] = "fail",
             };
-            using var response = await SendAsync(() => JsonRequest(HttpMethod.Post, ItemUrl(parent, "/children"), body), _graph, true, ct)
+            using var response = await SendAsync(() => JsonRequest(HttpMethod.Post, ItemUrl(parent, "/children"), body), _graph, GraphResource, ct)
                 .ConfigureAwait(false);
             if (response.StatusCode != HttpStatusCode.Conflict) await EnsureSuccessAsync(response, ct).ConfigureAwait(false);
         }
@@ -245,14 +247,14 @@ public sealed class SharePointFileTree : IFileTree
     public async Task SetLastWriteTimeUtcAsync(string path, DateTime utc, CancellationToken ct)
     {
         var body = new JsonObject { ["fileSystemInfo"] = new JsonObject { ["lastModifiedDateTime"] = Iso(utc) } };
-        using var response = await SendAsync(() => JsonRequest(HttpMethod.Patch, ItemUrl(path), body), _graph, true, ct).ConfigureAwait(false);
+        using var response = await SendAsync(() => JsonRequest(HttpMethod.Patch, ItemUrl(path), body), _graph, GraphResource, ct).ConfigureAwait(false);
         await EnsureSuccessAsync(response, ct).ConfigureAwait(false);
     }
 
     /// <summary>Deletes a file (it goes to the SharePoint site's recycle bin).</summary>
     public async Task DeleteFileAsync(string path, CancellationToken ct)
     {
-        using var response = await SendAsync(() => new HttpRequestMessage(HttpMethod.Delete, ItemUrl(path)), _graph, true, ct).ConfigureAwait(false);
+        using var response = await SendAsync(() => new HttpRequestMessage(HttpMethod.Delete, ItemUrl(path)), _graph, GraphResource, ct).ConfigureAwait(false);
         if (response.StatusCode != HttpStatusCode.NotFound) await EnsureSuccessAsync(response, ct).ConfigureAwait(false);
     }
 
@@ -263,8 +265,8 @@ public sealed class SharePointFileTree : IFileTree
                    ?? throw new FileNotFoundException($"'{path}' was not found in SharePoint.");
         var url = item["@microsoft.graph.downloadUrl"]?.GetValue<string>();
         var response = url != null
-            ? await SendAsync(() => new HttpRequestMessage(HttpMethod.Get, url), _plain, false, ct).ConfigureAwait(false)
-            : await SendAsync(() => new HttpRequestMessage(HttpMethod.Get, ItemUrl(path, "/content")), _graph, true, ct).ConfigureAwait(false);
+            ? await SendAsync(() => new HttpRequestMessage(HttpMethod.Get, url), _plain, null, ct).ConfigureAwait(false)
+            : await SendAsync(() => new HttpRequestMessage(HttpMethod.Get, ItemUrl(path, "/content")), _graph, GraphResource, ct).ConfigureAwait(false);
         try
         {
             await EnsureSuccessAsync(response, ct).ConfigureAwait(false);
@@ -291,7 +293,7 @@ public sealed class SharePointFileTree : IFileTree
         if (length == 0)
         {
             using (var put = await SendAsync(() => new HttpRequestMessage(HttpMethod.Put, ItemUrl(p, "/content")) { Content = new ByteArrayContent([]) },
-                       _graph, true, ct).ConfigureAwait(false))
+                       _graph, GraphResource, ct).ConfigureAwait(false))
             {
                 await EnsureSuccessAsync(put, ct).ConfigureAwait(false);
             }
@@ -310,7 +312,7 @@ public sealed class SharePointFileTree : IFileTree
             },
         };
         string uploadUrl;
-        using (var session = await SendAsync(() => JsonRequest(HttpMethod.Post, ItemUrl(p, "/createUploadSession"), sessionBody), _graph, true, ct)
+        using (var session = await SendAsync(() => JsonRequest(HttpMethod.Post, ItemUrl(p, "/createUploadSession"), sessionBody), _graph, GraphResource, ct)
                    .ConfigureAwait(false))
         {
             await EnsureSuccessAsync(session, ct).ConfigureAwait(false);
@@ -335,7 +337,7 @@ public sealed class SharePointFileTree : IFileTree
                     var req = new HttpRequestMessage(HttpMethod.Put, uploadUrl) { Content = new ByteArrayContent(buffer, 0, size) };
                     req.Content.Headers.ContentRange = new ContentRangeHeaderValue(start, start + size - 1, length);
                     return req;
-                }, _plain, false, ct).ConfigureAwait(false);
+                }, _plain, null, ct).ConfigureAwait(false);
                 await EnsureSuccessAsync(response, ct).ConfigureAwait(false);
                 offset += size;
                 progress(offset);
@@ -373,7 +375,7 @@ public sealed class SharePointFileTree : IFileTree
     /// <summary>GET a JSON object; null on 404.</summary>
     private async Task<JsonNode?> GetJsonAsync(string url, CancellationToken ct)
     {
-        using var response = await SendAsync(() => new HttpRequestMessage(HttpMethod.Get, url), _graph, true, ct).ConfigureAwait(false);
+        using var response = await SendAsync(() => new HttpRequestMessage(HttpMethod.Get, url), _graph, GraphResource, ct).ConfigureAwait(false);
         if (response.StatusCode == HttpStatusCode.NotFound) return null;
         await EnsureSuccessAsync(response, ct).ConfigureAwait(false);
         return JsonNode.Parse(await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false));
@@ -399,16 +401,17 @@ public sealed class SharePointFileTree : IFileTree
     /// Sends a request, retrying throttling (429, 503) and transient failures with Retry-After / back-off,
     /// and refreshing the token once on 401.
     /// </summary>
-    private async Task<HttpResponseMessage> SendAsync(Func<HttpRequestMessage> create, HttpClient client, bool authenticate,
+    /// <param name="resource">Token audience (Graph or a SharePoint host); null = no token (pre-authenticated URLs).</param>
+    private async Task<HttpResponseMessage> SendAsync(Func<HttpRequestMessage> create, HttpClient client, string? resource,
         CancellationToken ct)
     {
         var refreshed = false;
         for (var attempt = 1; ; attempt++)
         {
             using var request = create();
-            if (authenticate)
+            if (resource != null)
             {
-                var token = await _tokens.GetAccessTokenAsync(refreshed, ct).ConfigureAwait(false);
+                var token = await _tokens.GetAccessTokenAsync(resource, refreshed, ct).ConfigureAwait(false);
                 request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
             }
 
@@ -425,7 +428,7 @@ public sealed class SharePointFileTree : IFileTree
                 continue;
             }
 
-            if (response.StatusCode == HttpStatusCode.Unauthorized && authenticate && !refreshed)
+            if (response.StatusCode == HttpStatusCode.Unauthorized && resource != null && !refreshed)
             {
                 response.Dispose();
                 refreshed = true;
@@ -466,9 +469,19 @@ public sealed class SharePointFileTree : IFileTree
         try
         {
             var text = await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
-            var error = JsonNode.Parse(text)?["error"];
-            code = error?["code"]?.GetValue<string>() ?? code;
-            message = error?["message"]?.GetValue<string>() ?? text;
+            var root = JsonNode.Parse(text);
+            if (root?["odata.error"] is { } spError)
+            {
+                // SharePoint REST: {"odata.error":{"code":"…","message":{"lang":"en-US","value":"…"}}}
+                code = spError["code"]?.GetValue<string>() ?? code;
+                message = spError["message"]?["value"]?.GetValue<string>() ?? text;
+            }
+            else
+            {
+                var error = root?["error"];
+                code = error?["code"]?.GetValue<string>() ?? code;
+                message = error?["message"]?.GetValue<string>() ?? text;
+            }
         }
         catch (JsonException)
         {
@@ -476,7 +489,7 @@ public sealed class SharePointFileTree : IFileTree
         }
 
         if (response.StatusCode == HttpStatusCode.Forbidden)
-            message += " (check that the app registration has the Sites.ReadWrite.All / Sites.Selected permission with admin consent, and that you can access this site)";
+            message += " (check that the app registration has the Sites.ReadWrite.All / Sites.Selected permission – and SharePoint AllSites.Write when Created/Modified are preserved – with admin consent, and that you can access this site)";
         throw new GraphException(response.StatusCode, code, message);
     }
 

@@ -52,7 +52,7 @@ public sealed class TransferRunner(AzCopyRunner azCopy)
     private static string RequireExe(string? exe) =>
         exe ?? throw new InvalidOperationException("azcopy.exe was not found.");
 
-    private async Task<IFileTree> OpenAsync(LocationSpec spec, ExecutionPlan plan, Action<string> output, CancellationToken ct)
+    private async Task<IFileTree> OpenAsync(LocationSpec spec, ExecutionPlan plan, bool isDestination, Action<string> output, CancellationToken ct)
     {
         if (spec.IsSharePoint)
         {
@@ -60,6 +60,9 @@ public sealed class TransferRunner(AzCopyRunner azCopy)
             var tokens = GraphTokenProviderFactory?.Invoke(spec, output) ?? new MsalGraphTokenProvider(spec, TokenCacheFile, output);
             var sp = await SharePointFileTree.ConnectAsync(spec, tokens, output, ct, GraphHandler, GraphBaseUrl).ConfigureAwait(false);
             if (SharePointChunkSize is { } chunk) sp.ChunkSize = chunk;
+            if (isDestination) sp.MetadataMode = plan.SharePointMetadata;
+            else if (plan.SharePointMetadata == SharePointMetadataMode.DatesAndAuthors && plan.Request.Destination?.IsSharePoint == true)
+                sp.ReadAuthors = true;
             return sp;
         }
 
@@ -77,7 +80,14 @@ public sealed class TransferRunner(AzCopyRunner azCopy)
         _ => spec.LocalPath.Trim(),
     };
 
-    private static int Finish(TreeCopyResult r, Action<string> output)
+    /// <summary>Files are copied even when their SharePoint columns could not be set; say how many.</summary>
+    private static void ReportMetadata(IFileTree dst, Action<string> output)
+    {
+        if (dst is SharePointFileTree { MetadataFailures: > 0 } sp)
+            output($"WARNING: Created/Modified could not be set on {sp.MetadataFailures} file(s); the files themselves were copied. See the warnings above.");
+    }
+
+        private static int Finish(TreeCopyResult r, Action<string> output)
     {
         output("Final Job Status: " + r.Status);
         return r.Failed == 0 ? 0 : 1;
@@ -87,10 +97,11 @@ public sealed class TransferRunner(AzCopyRunner azCopy)
     {
         var src = plan.Request.Source!;
         var dst = plan.Request.Destination!;
-        using var srcTree = await OpenAsync(src, plan, output, ct).ConfigureAwait(false);
-        using var dstTree = await OpenAsync(dst, plan, output, ct).ConfigureAwait(false);
+        using var srcTree = await OpenAsync(src, plan, false, output, ct).ConfigureAwait(false);
+        using var dstTree = await OpenAsync(dst, plan, true, output, ct).ConfigureAwait(false);
         var result = await new TreeCopier(output)
             .CopyAsync(srcTree, PathOf(src), dstTree, PathOf(dst), plan.TreeOptions!, ct).ConfigureAwait(false);
+        ReportMetadata(dstTree, output);
         return Finish(result, output);
     }
 
@@ -107,7 +118,7 @@ public sealed class TransferRunner(AzCopyRunner azCopy)
         var staging = new StagingArea(plan.StagingRoot, output);
         try
         {
-            using var srcTree = await OpenAsync(src, plan, output, ct).ConfigureAwait(false);
+            using var srcTree = await OpenAsync(src, plan, false, output, ct).ConfigureAwait(false);
             var local = new LocalFileTree();
             var copier = new TreeCopier(output);
 
@@ -230,7 +241,7 @@ public sealed class TransferRunner(AzCopyRunner azCopy)
         try
         {
             // Connect first so credential / host key problems show up before any download.
-            using var dstTree = await OpenAsync(dst, plan, output, ct).ConfigureAwait(false);
+            using var dstTree = await OpenAsync(dst, plan, true, output, ct).ConfigureAwait(false);
 
             var leg = TransferPlanner.BuildAzCopyLeg(plan, null, new LocationSpec { Kind = LocationKind.Local, LocalPath = staging.Folder });
             if (!leg.IsValid) throw new InvalidOperationException(string.Join(" ", leg.Errors));
@@ -245,7 +256,7 @@ public sealed class TransferRunner(AzCopyRunner azCopy)
             }
 
             output($"INFO: Downloading with azcopy and uploading each completed file to {dstTree.DisplayName} (staging limit {StagingArea.Describe(plan.StagingLimitBytes)})");
-            var local = new LocalFileTree();
+            var local = new LocalFileTree { ProvidesCreationTime = false }; // staged copies: creation time = download time
             var copier = new TreeCopier(output);
             var uploadOptions = new TreeCopyOptions { Overwrite = o.Overwrite, SyncMode = o.SyncMode };
             var result = new TreeCopyResult();
@@ -301,6 +312,7 @@ public sealed class TransferRunner(AzCopyRunner azCopy)
 
             new ProgressReporter(output, result, 0).Report(force: true);
             output($"INFO: Uploaded {TreeCopier.FormatBytes(result.Bytes)} to {dstTree.DisplayName}; peak staging usage {TreeCopier.FormatBytes(staging.PeakBytes)}");
+            ReportMetadata(dstTree, output);
             var status = Finish(result, output);
             return code != 0 ? code : status;
         }

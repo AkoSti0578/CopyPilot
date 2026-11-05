@@ -166,7 +166,9 @@ public sealed class LocationViewModel : ObservableObject
             "CopyPilot transfers SharePoint files itself via Microsoft Graph (azcopy does not support SharePoint). Needs an app registration " +
             "with the Microsoft Graph permission Sites.ReadWrite.All (delegated, for 'Sign in as me' – add redirect URI http://localhost under " +
             "'Mobile and desktop applications') or Sites.Selected / Sites.ReadWrite.All (application, for app-only), with admin consent. " +
-            "File contents and last-modified times are copied; authors, versions and permissions are not.",
+            "File contents and last-modified times are copied. To also set the library's Created, Modified and authors, use " +
+            "'sharepoint-preserve-metadata' on the Options tab (needs the SharePoint permission AllSites.Write, or a certificate for app-only). " +
+            "Versions and permissions are not copied.",
         LocationKind.Sftp => IsDestination
             ? "CopyPilot uploads over SFTP. The path is a folder (created if needed); from a local or SFTP source a single file may also be given a new file name. From cloud storage, azcopy downloads into a small staging folder and each file is uploaded and permanently deleted right away."
             : "CopyPilot downloads over SFTP. Use a file, a folder (with --recursive) or a wildcard like /data/*.csv. To cloud storage, files pass through a small staging folder in batches (see sftp-staging-limit-mb) and are permanently deleted once uploaded.",

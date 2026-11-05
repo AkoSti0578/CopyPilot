@@ -34,6 +34,9 @@ public sealed class ExecutionPlan
     public long StagingLimitBytes { get; init; } = TransferPlanner.DefaultStagingLimitMb * 1024 * 1024;
     public TimeSpan SftpTimeout { get; init; } = TimeSpan.FromSeconds(30);
 
+    /// <summary>SharePoint list item fields (Created, Modified, authors) set on files uploaded to SharePoint.</summary>
+    public SharePointMetadataMode SharePointMetadata { get; init; } = SharePointMetadataMode.None;
+
     public List<string> Errors { get; } = [];
 
     /// <summary>Options that are set but have no effect on the CopyPilot part of the transfer.</summary>
@@ -177,7 +180,32 @@ public static class TransferPlanner
             StagingLimitBytes = (long)(ParseNumber(opts.GetValueOrDefault("sftp-staging-limit-mb")) is { } mb and >= 0 ? mb : DefaultStagingLimitMb) * 1024 * 1024,
             SftpTimeout = TimeSpan.FromSeconds(
                 double.TryParse(opts.GetValueOrDefault("sftp-timeout-seconds"), NumberStyles.Float, CultureInfo.InvariantCulture, out var t) && t > 0 ? t : 30),
+            SharePointMetadata = ParseMetadataMode(opts.GetValueOrDefault("sharepoint-preserve-metadata"), out var badMode),
         };
+
+        if (badMode != null) plan.Errors.Add($"sharepoint-preserve-metadata must be none, dates or dates-and-authors (not '{badMode}').");
+        if (plan.SharePointMetadata != SharePointMetadataMode.None)
+        {
+            if (!dst.IsSharePoint)
+            {
+                plan.Warnings.Add("sharepoint-preserve-metadata only applies when the destination is SharePoint.");
+            }
+            else
+            {
+                // SharePoint's REST API refuses app-only tokens obtained with a client secret.
+                if (dst.SharePointAuth == SharePointAuthMode.ClientSecret)
+                    plan.Errors.Add("Setting Created/Modified needs SharePoint's REST API, which does not accept app-only sign-in with a client secret. Use a certificate or sign in as a user.");
+                if (plan.SharePointMetadata == SharePointMetadataMode.DatesAndAuthors)
+                {
+                    if (!src.IsSharePoint)
+                        plan.Warnings.Add("Authors (Created By / Modified By) can only be carried over from a SharePoint source; only Created and Modified are set.");
+                    else if (src.SharePointAuth == SharePointAuthMode.ClientSecret)
+                        plan.Errors.Add("Reading authors from the source needs SharePoint's REST API, which does not accept app-only sign-in with a client secret. Use a certificate or sign in as a user.");
+                    else if (!string.Equals(SafeHost(src.SiteUrl), SafeHost(dst.SiteUrl), StringComparison.OrdinalIgnoreCase))
+                        plan.Warnings.Add("Source and destination are in different SharePoint tenants: authors only carry over if the same accounts exist in the destination tenant.");
+                }
+            }
+        }
 
         plan.Errors.AddRange(src.Validate("Source"));
         plan.Errors.AddRange(dst.Validate("Destination"));
@@ -256,6 +284,22 @@ public static class TransferPlanner
             ExtraArguments = request.ExtraArguments,
         });
     }
+
+    private static SharePointMetadataMode ParseMetadataMode(string? value, out string? invalid)
+    {
+        invalid = null;
+        switch (value?.Trim().ToLowerInvariant())
+        {
+            case null or "" or "none": return SharePointMetadataMode.None;
+            case "dates": return SharePointMetadataMode.Dates;
+            case "dates-and-authors": return SharePointMetadataMode.DatesAndAuthors;
+            default:
+                invalid = value;
+                return SharePointMetadataMode.None;
+        }
+    }
+
+    private static string? SafeHost(string url) => Uri.TryCreate(url.Trim(), UriKind.Absolute, out var u) ? u.Host : null;
 
     private static double? ParseNumber(string? s) =>
         double.TryParse(s, NumberStyles.Float, CultureInfo.InvariantCulture, out var d) ? d : null;
