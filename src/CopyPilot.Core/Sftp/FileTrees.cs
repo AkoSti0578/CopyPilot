@@ -4,6 +4,12 @@ namespace CopyPilot.Core.Sftp;
 public sealed record FileEntry(string Path, string Name, bool IsDirectory, long Length, DateTime LastWriteUtc);
 
 /// <summary>
+/// Extra file properties that can be carried to the destination (SharePoint "Created", "Modified",
+/// "Created By", "Modified By"). Authors are SharePoint login names, e.g. "i:0#.f|membership|user@contoso.com".
+/// </summary>
+public sealed record FileMetadata(DateTime? CreatedUtc, DateTime? ModifiedUtc, string? CreatedBy, string? ModifiedBy);
+
+/// <summary>
 /// Minimal file system abstraction so the same copy engine works for local disks and SFTP servers.
 /// </summary>
 public interface IFileTree : IDisposable
@@ -21,6 +27,15 @@ public interface IFileTree : IDisposable
 
     /// <summary>True when <see cref="WriteFromAsync"/> already stores the last-modified time.</summary>
     bool SetsLastWriteTimeOnWrite => false;
+
+    /// <summary>True when the destination applies <see cref="FileMetadata"/> after a file was written.</summary>
+    bool WantsSourceMetadata => false;
+
+    /// <summary>Metadata of a source file (null when the tree has none beyond <see cref="FileEntry"/>).</summary>
+    Task<FileMetadata?> GetMetadataAsync(FileEntry file, CancellationToken ct) => Task.FromResult<FileMetadata?>(null);
+
+    /// <summary>Applies the source's metadata to a file that was just written. Problems are reported, not thrown.</summary>
+    Task ApplyMetadataAsync(string path, FileEntry source, FileMetadata? metadata, CancellationToken ct) => Task.CompletedTask;
 
     string Combine(string directory, string name);
     string GetName(string path);
@@ -57,6 +72,18 @@ public sealed class LocalFileTree : IFileTree
 {
     public string DisplayName => "local";
     public bool IsLocal => true;
+
+    /// <summary>
+    /// Report the file's creation time as metadata. False for staging folders, where the creation time
+    /// is the moment azcopy downloaded the file, not when the original was created.
+    /// </summary>
+    public bool ProvidesCreationTime { get; init; } = true;
+
+    public Task<FileMetadata?> GetMetadataAsync(FileEntry file, CancellationToken ct)
+    {
+        var created = ProvidesCreationTime ? File.GetCreationTimeUtc(file.Path) : (DateTime?)null;
+        return Task.FromResult<FileMetadata?>(new FileMetadata(created, file.LastWriteUtc, null, null));
+    }
 
     public string Combine(string directory, string name) => Path.Combine(directory, name);
 

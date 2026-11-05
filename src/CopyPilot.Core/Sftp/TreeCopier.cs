@@ -250,6 +250,13 @@ public sealed class TreeCopier(Action<string> output)
 
         if (!dst.SetsLastWriteTimeOnWrite)
             await dst.SetLastWriteTimeUtcAsync(target, entry.LastWriteUtc, ct).ConfigureAwait(false);
+
+        if (dst.WantsSourceMetadata)
+        {
+            var metadata = await src.GetMetadataAsync(entry, ct).ConfigureAwait(false)
+                           ?? new FileMetadata(null, entry.LastWriteUtc, null, null);
+            await dst.ApplyMetadataAsync(target, entry, metadata, ct).ConfigureAwait(false);
+        }
         return CopyOutcome.Copied;
     }
 

@@ -8,36 +8,44 @@ using Microsoft.Identity.Client.Extensions.Msal;
 
 namespace CopyPilot.Core.SharePoint;
 
-/// <summary>Supplies Microsoft Graph access tokens.</summary>
+/// <summary>Supplies access tokens for Microsoft Graph and for SharePoint's own REST API.</summary>
 public interface IGraphTokenProvider
 {
-    Task<string> GetAccessTokenAsync(bool forceRefresh, CancellationToken ct);
+    /// <param name="resource">"https://graph.microsoft.com" or a SharePoint host such as "https://contoso.sharepoint.com".</param>
+    Task<string> GetAccessTokenAsync(string resource, bool forceRefresh, CancellationToken ct);
 }
 
 /// <summary>
-/// Signs in to Microsoft Entra ID with MSAL: as a user (system browser or device code, delegated
-/// Sites.ReadWrite.All) or as the app itself (client secret / certificate, application permissions such as
-/// Sites.Selected or Sites.ReadWrite.All). Client applications are reused for the lifetime of the process,
+/// Signs in to Microsoft Entra ID with MSAL: as a user (system browser or device code; delegated Graph
+/// Sites.ReadWrite.All, plus SharePoint AllSites.Write when list item metadata is preserved) or as the app itself
+/// (client secret / certificate, application permissions such as Sites.Selected or Sites.ReadWrite.All). Client applications are reused for the lifetime of the process,
 /// and user tokens are cached encrypted on disk (DPAPI on Windows), so users sign in once.
 /// </summary>
 public sealed class MsalGraphTokenProvider(LocationSpec spec, string? userTokenCacheFile, Action<string> log) : IGraphTokenProvider
 {
-    public static readonly string[] DelegatedScopes = ["https://graph.microsoft.com/Sites.ReadWrite.All"];
-    public static readonly string[] ApplicationScopes = ["https://graph.microsoft.com/.default"];
+    public const string GraphResource = "https://graph.microsoft.com";
+
+    /// <summary>Delegated scopes: Graph for files, SharePoint AllSites.Write for list item fields (Created, Author, …).</summary>
+    public static string[] DelegatedScopes(string resource) =>
+        resource == GraphResource ? [$"{GraphResource}/Sites.ReadWrite.All"] : [$"{resource.TrimEnd('/')}/AllSites.Write"];
+
+    public static string[] ApplicationScopes(string resource) => [$"{resource.TrimEnd('/')}/.default"];
 
     private static readonly ConcurrentDictionary<string, Lazy<Task<IClientApplicationBase>>> Apps = new();
 
     // Only one interactive sign-in at a time (source and destination can both be SharePoint).
     private static readonly SemaphoreSlim SignInGate = new(1, 1);
 
-    public async Task<string> GetAccessTokenAsync(bool forceRefresh, CancellationToken ct)
+    public async Task<string> GetAccessTokenAsync(string resource, bool forceRefresh, CancellationToken ct)
     {
         var app = await Apps.GetOrAdd(Key(), _ => new Lazy<Task<IClientApplicationBase>>(CreateAppAsync)).Value.ConfigureAwait(false);
         if (app is IConfidentialClientApplication cca)
         {
-            var r = await cca.AcquireTokenForClient(ApplicationScopes).WithForceRefresh(forceRefresh).ExecuteAsync(ct).ConfigureAwait(false);
+            var r = await cca.AcquireTokenForClient(ApplicationScopes(resource)).WithForceRefresh(forceRefresh).ExecuteAsync(ct).ConfigureAwait(false);
             return r.AccessToken;
         }
+
+        var scopes = DelegatedScopes(resource);
 
         var pca = (IPublicClientApplication)app;
         await SignInGate.WaitAsync(ct).ConfigureAwait(false);
@@ -48,7 +56,7 @@ public sealed class MsalGraphTokenProvider(LocationSpec spec, string? userTokenC
             {
                 try
                 {
-                    var silent = await pca.AcquireTokenSilent(DelegatedScopes, account).WithForceRefresh(forceRefresh)
+                    var silent = await pca.AcquireTokenSilent(scopes, account).WithForceRefresh(forceRefresh)
                         .ExecuteAsync(ct).ConfigureAwait(false);
                     return silent.AccessToken;
                 }
@@ -61,7 +69,7 @@ public sealed class MsalGraphTokenProvider(LocationSpec spec, string? userTokenC
             AuthenticationResult result;
             if (spec.SharePointAuth == SharePointAuthMode.DeviceCode)
             {
-                result = await pca.AcquireTokenWithDeviceCode(DelegatedScopes, code =>
+                result = await pca.AcquireTokenWithDeviceCode(scopes, code =>
                 {
                     log("ACTION REQUIRED: " + code.Message);
                     return Task.CompletedTask;
@@ -70,7 +78,7 @@ public sealed class MsalGraphTokenProvider(LocationSpec spec, string? userTokenC
             else
             {
                 log("INFO: A browser window opens to sign in to Microsoft 365 …");
-                result = await pca.AcquireTokenInteractive(DelegatedScopes)
+                result = await pca.AcquireTokenInteractive(scopes)
                     .WithUseEmbeddedWebView(false)
                     .WithPrompt(Prompt.SelectAccount)
                     .ExecuteAsync(ct).ConfigureAwait(false);

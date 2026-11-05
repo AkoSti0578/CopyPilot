@@ -207,6 +207,9 @@ public static class OptionCatalog
         Num("sftp-staging-limit-mb", CatSftp,
             "Maximum size of the staging folder in MB. Each file is permanently deleted (like Shift+Delete, no Recycle Bin) as soon as it has been transferred. SFTP / SharePoint → cloud uploads in batches of up to this size; cloud → SFTP / SharePoint pauses azcopy while the limit is exceeded. 0 = one file at a time (slower for many small files).",
             Cmds(Copy, Sync), "256") with { CopyPilotOnly = true },
+        Choice("sharepoint-preserve-metadata", CatSftp,
+            "SharePoint destination: also set the library's visible columns. 'dates' sets Created and Modified to the source's dates; 'dates-and-authors' also sets Created By and Modified By (source must be SharePoint, same tenant). Uses SharePoint's ValidateUpdateListItem without creating an extra version. Needs the SharePoint permission AllSites.Write (user sign-in) or a certificate (app-only).",
+            Cmds(Copy, Sync), ["none", "dates", "dates-and-authors"], "none") with { CopyPilotOnly = true },
         Num("sftp-timeout-seconds", CatSftp, "SSH connection timeout in seconds.", Cmds(Copy, Sync), "30") with { CopyPilotOnly = true },
     ];
 

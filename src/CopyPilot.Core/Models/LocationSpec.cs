@@ -19,6 +19,17 @@ public enum LocationKind
     SharePoint,
 }
 
+/// <summary>Which SharePoint list item fields are carried over to uploaded files.</summary>
+public enum SharePointMetadataMode
+{
+    /// <summary>Only the file's last-modified time (stored by Graph); the library shows the upload time.</summary>
+    None,
+    /// <summary>Set "Created" and "Modified" to the source's dates.</summary>
+    Dates,
+    /// <summary>Also set "Created By" and "Modified By" (from a SharePoint source in the same tenant).</summary>
+    DatesAndAuthors,
+}
+
 /// <summary>How CopyPilot signs in to Microsoft Graph for SharePoint.</summary>
 public enum SharePointAuthMode
 {
