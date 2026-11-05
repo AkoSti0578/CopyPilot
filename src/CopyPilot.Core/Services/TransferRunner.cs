@@ -140,8 +140,12 @@ public sealed class TransferRunner(AzCopyRunner azCopy)
             }
 
             var selection = await copier.ResolveAsync(srcTree, PathOf(src), stagingOptions, ct).ConfigureAwait(false);
+            // single file → the staged file; named folder → the staged folder (keeps its name for --as-subdir);
+            // wildcard or the root of a library / home folder → the staging folder's contents, never the staging
+            // folder itself (azcopy would otherwise create a "job-…" folder at the destination).
+            var contentsOnly = !selection.IsSingleFile && (selection.IsWildcard || selection.Prefix.Length == 0);
             var stagedSource = selection.IsSingleFile ? Path.Combine(staging.Folder, selection.Name)
-                : selection.IsWildcard ? (isSync ? staging.Folder : Path.Combine(staging.Folder, "*"))
+                : contentsOnly ? (isSync ? staging.Folder : Path.Combine(staging.Folder, "*"))
                 : Path.Combine(staging.Folder, selection.Name);
             var leg = TransferPlanner.BuildAzCopyLeg(plan, new LocationSpec { Kind = LocationKind.Local, LocalPath = stagedSource }, null);
             if (!leg.IsValid) throw new InvalidOperationException(string.Join(" ", leg.Errors));
