@@ -72,6 +72,66 @@
                              ToolTip="Shared access signature, e.g. sv=2024-...&amp;sig=... (with or without leading ?)" />
             </StackPanel>
 
+            <!-- SharePoint -->
+            <StackPanel Visibility="{Binding IsSharePoint, Converter={StaticResource BoolToVis}}">
+                <TextBlock Text="Site URL" Style="{StaticResource FieldLabel}" />
+                <TextBox Text="{Binding SiteUrl, UpdateSourceTrigger=PropertyChanged}" Style="{StaticResource MonoTextBox}"
+                         ToolTip="e.g. https://contoso.sharepoint.com/sites/Team – you can also paste the URL of a library or a OneDrive (https://contoso-my.sharepoint.com/personal/…)" />
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="10" />
+                        <ColumnDefinition Width="*" />
+                    </Grid.ColumnDefinitions>
+                    <StackPanel>
+                        <TextBlock Text="Document library" Style="{StaticResource FieldLabel}" />
+                        <TextBox Text="{Binding Library, UpdateSourceTrigger=PropertyChanged}"
+                                 ToolTip="Name as shown in SharePoint (e.g. Documents, Gedeelde documenten) or its URL name (Shared Documents). Empty = the site's default library." />
+                    </StackPanel>
+                    <StackPanel Grid.Column="2">
+                        <TextBlock Text="Folder (optional, wildcards * allowed)" Style="{StaticResource FieldLabel}" />
+                        <TextBox Text="{Binding Path, UpdateSourceTrigger=PropertyChanged}" Style="{StaticResource MonoTextBox}"
+                                 ToolTip="Path inside the library, e.g. Projects/2026 or Reports/*.xlsx" />
+                    </StackPanel>
+                </Grid>
+                <TextBlock Text="Sign-in" Style="{StaticResource FieldLabel}" />
+                <ComboBox ItemsSource="{x:Static vm:LocationViewModel.SharePointAuthModes}" SelectedItem="{Binding SelectedSharePointAuth}" />
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="10" />
+                        <ColumnDefinition Width="*" />
+                    </Grid.ColumnDefinitions>
+                    <StackPanel>
+                        <TextBlock Text="Application (client) ID" Style="{StaticResource FieldLabel}" />
+                        <TextBox Text="{Binding ClientId, UpdateSourceTrigger=PropertyChanged}" Style="{StaticResource MonoTextBox}"
+                                 ToolTip="From the app registration in Microsoft Entra ID (Overview page)" />
+                    </StackPanel>
+                    <StackPanel Grid.Column="2">
+                        <TextBlock Text="Tenant (ID or domain)" Style="{StaticResource FieldLabel}" />
+                        <TextBox Text="{Binding TenantId, UpdateSourceTrigger=PropertyChanged}" Style="{StaticResource MonoTextBox}"
+                                 ToolTip="e.g. contoso.onmicrosoft.com. Optional for 'Sign in as me', required for app-only." />
+                    </StackPanel>
+                </Grid>
+                <StackPanel Visibility="{Binding UsesClientSecret, Converter={StaticResource BoolToVis}}">
+                    <TextBlock Text="Client secret" Style="{StaticResource FieldLabel}" />
+                    <PasswordBox v:PasswordBoxAssistant.BoundPassword="{Binding ClientSecret, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                </StackPanel>
+                <StackPanel Visibility="{Binding UsesCertificate, Converter={StaticResource BoolToVis}}">
+                    <TextBlock Text="Certificate (.pfx)" Style="{StaticResource FieldLabel}" />
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <TextBox Text="{Binding CertificatePath, UpdateSourceTrigger=PropertyChanged}" />
+                        <Button Grid.Column="1" Content="Browse…" Margin="6,0,0,0" Command="{Binding BrowseCertificateCommand}" />
+                    </Grid>
+                    <TextBlock Text="Certificate password" Style="{StaticResource FieldLabel}" />
+                    <PasswordBox v:PasswordBoxAssistant.BoundPassword="{Binding CertificatePassword, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                </StackPanel>
+            </StackPanel>
+
             <!-- SFTP -->
             <StackPanel Visibility="{Binding IsSftp, Converter={StaticResource BoolToVis}}">
                 <Grid>

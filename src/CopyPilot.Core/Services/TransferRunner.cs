@@ -1,16 +1,31 @@
 using CopyPilot.Core.Models;
+using CopyPilot.Core.SharePoint;
 using CopyPilot.Core.Sftp;
 
 namespace CopyPilot.Core.Services;
 
 /// <summary>
-/// Executes an <see cref="ExecutionPlan"/>: plain azcopy commands, or SFTP transfers
+/// Executes an <see cref="ExecutionPlan"/>: plain azcopy commands, or SFTP / SharePoint transfers
 /// (direct, or staged through a local folder combined with azcopy).
 /// </summary>
 public sealed class TransferRunner(AzCopyRunner azCopy)
 {
     /// <summary>Folder/file that stores trusted SFTP host keys (null = do not verify).</summary>
     public string? KnownHostsFile { get; init; }
+
+    /// <summary>File that keeps Microsoft 365 user sign-ins (encrypted with DPAPI on Windows). Null = sign in every run.</summary>
+    public string? TokenCacheFile { get; init; }
+
+    /// <summary>Creates the Graph token provider for a SharePoint location (tests replace it).</summary>
+    public Func<LocationSpec, Action<string>, IGraphTokenProvider>? GraphTokenProviderFactory { get; init; }
+
+    /// <summary>HTTP handler and base URL for Microsoft Graph (tests replace them).</summary>
+    public HttpMessageHandler? GraphHandler { get; init; }
+
+    public string GraphBaseUrl { get; init; } = SharePointFileTree.DefaultGraphBase;
+
+    /// <summary>Upload chunk size for SharePoint (multiple of 320 KiB); null = default (10 MiB).</summary>
+    public int? SharePointChunkSize { get; init; }
 
     /// <returns>0 on success, non-zero otherwise.</returns>
     public async Task<int> RunAsync(
@@ -37,8 +52,20 @@ public sealed class TransferRunner(AzCopyRunner azCopy)
     private static string RequireExe(string? exe) =>
         exe ?? throw new InvalidOperationException("azcopy.exe was not found.");
 
-    private async Task<IFileTree> OpenAsync(LocationSpec spec, ExecutionPlan plan, Action<string> output, CancellationToken ct)
+    private async Task<IFileTree> OpenAsync(LocationSpec spec, ExecutionPlan plan, bool isDestination, Action<string> output, CancellationToken ct)
     {
+        if (spec.IsSharePoint)
+        {
+            output($"INFO: Connecting to SharePoint {spec.SiteUrl.Trim()} …");
+            var tokens = GraphTokenProviderFactory?.Invoke(spec, output) ?? new MsalGraphTokenProvider(spec, TokenCacheFile, output);
+            var sp = await SharePointFileTree.ConnectAsync(spec, tokens, output, ct, GraphHandler, GraphBaseUrl).ConfigureAwait(false);
+            if (SharePointChunkSize is { } chunk) sp.ChunkSize = chunk;
+            if (isDestination) sp.MetadataMode = plan.SharePointMetadata;
+            else if (plan.SharePointMetadata == SharePointMetadataMode.DatesAndAuthors && plan.Request.Destination?.IsSharePoint == true)
+                sp.ReadAuthors = true;
+            return sp;
+        }
+
         if (!spec.IsSftp) return new LocalFileTree();
         output($"INFO: Connecting to {spec.Build()} …");
         var tree = await SftpFileTree.ConnectAsync(spec, KnownHostsFile, plan.SftpTimeout, output, ct).ConfigureAwait(false);
@@ -46,9 +73,21 @@ public sealed class TransferRunner(AzCopyRunner azCopy)
         return tree;
     }
 
-    private static string PathOf(LocationSpec spec) => spec.IsSftp ? spec.SftpPath : spec.LocalPath.Trim();
+    private static string PathOf(LocationSpec spec) => spec.Kind switch
+    {
+        LocationKind.Sftp => spec.SftpPath,
+        LocationKind.SharePoint => spec.SharePointPath,
+        _ => spec.LocalPath.Trim(),
+    };
 
-    private static int Finish(TreeCopyResult r, Action<string> output)
+    /// <summary>Files are copied even when their SharePoint columns could not be set; say how many.</summary>
+    private static void ReportMetadata(IFileTree dst, Action<string> output)
+    {
+        if (dst is SharePointFileTree { MetadataFailures: > 0 } sp)
+            output($"WARNING: Created/Modified could not be set on {sp.MetadataFailures} file(s); the files themselves were copied. See the warnings above.");
+    }
+
+        private static int Finish(TreeCopyResult r, Action<string> output)
     {
         output("Final Job Status: " + r.Status);
         return r.Failed == 0 ? 0 : 1;
@@ -58,15 +97,16 @@ public sealed class TransferRunner(AzCopyRunner azCopy)
     {
         var src = plan.Request.Source!;
         var dst = plan.Request.Destination!;
-        using var srcTree = await OpenAsync(src, plan, output, ct).ConfigureAwait(false);
-        using var dstTree = await OpenAsync(dst, plan, output, ct).ConfigureAwait(false);
+        using var srcTree = await OpenAsync(src, plan, false, output, ct).ConfigureAwait(false);
+        using var dstTree = await OpenAsync(dst, plan, true, output, ct).ConfigureAwait(false);
         var result = await new TreeCopier(output)
             .CopyAsync(srcTree, PathOf(src), dstTree, PathOf(dst), plan.TreeOptions!, ct).ConfigureAwait(false);
+        ReportMetadata(dstTree, output);
         return Finish(result, output);
     }
 
     // ------------------------------------------------------------------------------------------
-    // SFTP → cloud: download a batch into the staging folder, let azcopy upload it, then permanently
+    // SFTP / SharePoint → cloud: download a batch into the staging folder, let azcopy upload it, then permanently
     // delete the batch. The staging folder never holds much more than the staging limit.
     // ------------------------------------------------------------------------------------------
     private async Task<int> RunSftpToCloudAsync(ExecutionPlan plan, string exe, IReadOnlyDictionary<string, string> env,
@@ -78,7 +118,7 @@ public sealed class TransferRunner(AzCopyRunner azCopy)
         var staging = new StagingArea(plan.StagingRoot, output);
         try
         {
-            using var srcTree = await OpenAsync(src, plan, output, ct).ConfigureAwait(false);
+            using var srcTree = await OpenAsync(src, plan, false, output, ct).ConfigureAwait(false);
             var local = new LocalFileTree();
             var copier = new TreeCopier(output);
 
@@ -94,14 +134,18 @@ public sealed class TransferRunner(AzCopyRunner azCopy)
             };
             if (o.DryRun)
             {
-                var dry = await copier.CopyAsync(srcTree, src.SftpPath, local, staging.Folder, stagingOptions, ct).ConfigureAwait(false);
+                var dry = await copier.CopyAsync(srcTree, PathOf(src), local, staging.Folder, stagingOptions, ct).ConfigureAwait(false);
                 output("INFO: Dry run – nothing was downloaded or uploaded.");
                 return Finish(dry, output);
             }
 
-            var selection = await copier.ResolveAsync(srcTree, src.SftpPath, stagingOptions, ct).ConfigureAwait(false);
+            var selection = await copier.ResolveAsync(srcTree, PathOf(src), stagingOptions, ct).ConfigureAwait(false);
+            // single file → the staged file; named folder → the staged folder (keeps its name for --as-subdir);
+            // wildcard or the root of a library / home folder → the staging folder's contents, never the staging
+            // folder itself (azcopy would otherwise create a "job-…" folder at the destination).
+            var contentsOnly = !selection.IsSingleFile && (selection.IsWildcard || selection.Prefix.Length == 0);
             var stagedSource = selection.IsSingleFile ? Path.Combine(staging.Folder, selection.Name)
-                : selection.IsWildcard ? (isSync ? staging.Folder : Path.Combine(staging.Folder, "*"))
+                : contentsOnly ? (isSync ? staging.Folder : Path.Combine(staging.Folder, "*"))
                 : Path.Combine(staging.Folder, selection.Name);
             var leg = TransferPlanner.BuildAzCopyLeg(plan, new LocationSpec { Kind = LocationKind.Local, LocalPath = stagedSource }, null);
             if (!leg.IsValid) throw new InvalidOperationException(string.Join(" ", leg.Errors));
@@ -182,8 +226,8 @@ public sealed class TransferRunner(AzCopyRunner azCopy)
     }
 
     // ------------------------------------------------------------------------------------------
-    // Cloud → SFTP: azcopy downloads into the staging folder (to temporary names, renamed when a file
-    // is complete). Every completed file is uploaded to SFTP right away and permanently deleted.
+    // Cloud → SFTP / SharePoint: azcopy downloads into the staging folder (to temporary names, renamed when a
+    // file is complete). Every completed file is uploaded right away and permanently deleted.
     // When the staging folder exceeds the limit, azcopy is paused until the upload catches up.
     // ------------------------------------------------------------------------------------------
     private async Task<int> RunCloudToSftpAsync(ExecutionPlan plan, string exe, IReadOnlyDictionary<string, string> env,
@@ -197,7 +241,7 @@ public sealed class TransferRunner(AzCopyRunner azCopy)
         try
         {
             // Connect first so credential / host key problems show up before any download.
-            using var dstTree = await OpenAsync(dst, plan, output, ct).ConfigureAwait(false);
+            using var dstTree = await OpenAsync(dst, plan, true, output, ct).ConfigureAwait(false);
 
             var leg = TransferPlanner.BuildAzCopyLeg(plan, null, new LocationSpec { Kind = LocationKind.Local, LocalPath = staging.Folder });
             if (!leg.IsValid) throw new InvalidOperationException(string.Join(" ", leg.Errors));
@@ -207,12 +251,12 @@ public sealed class TransferRunner(AzCopyRunner azCopy)
             if (o.DryRun)
             {
                 var dryCode = await azCopy.RunAsync(exe, leg, legEnv, onLine, ct).ConfigureAwait(false);
-                output("INFO: Dry run – nothing was uploaded to SFTP.");
+                output($"INFO: Dry run – nothing was uploaded to {dstTree.DisplayName}.");
                 return dryCode;
             }
 
-            output($"INFO: Downloading with azcopy and uploading each completed file to SFTP (staging limit {StagingArea.Describe(plan.StagingLimitBytes)})");
-            var local = new LocalFileTree();
+            output($"INFO: Downloading with azcopy and uploading each completed file to {dstTree.DisplayName} (staging limit {StagingArea.Describe(plan.StagingLimitBytes)})");
+            var local = new LocalFileTree { ProvidesCreationTime = false }; // staged copies: creation time = download time
             var copier = new TreeCopier(output);
             var uploadOptions = new TreeCopyOptions { Overwrite = o.Overwrite, SyncMode = o.SyncMode };
             var result = new TreeCopyResult();
@@ -228,10 +272,10 @@ public sealed class TransferRunner(AzCopyRunner azCopy)
                 var ready = watcher.Scan(requireStable: !finished);
                 staging.Observe(watcher.StagedBytes);
 
-                // Back-pressure: pause azcopy while completed files wait for the (slower) SFTP upload.
+                // Back-pressure: pause azcopy while completed files wait for the (slower) upload.
                 if (!finished && ready.Count > 0 && watcher.StagedBytes > plan.StagingLimitBytes && !azCopy.IsSuspended && azCopy.Suspend() && !pausedLogged)
                 {
-                    output("INFO: Staging limit reached – azcopy is paused while files are uploaded to SFTP (this repeats silently).");
+                    output("INFO: Staging limit reached – azcopy is paused while files are uploaded (this repeats silently).");
                     pausedLogged = true;
                 }
 
@@ -239,7 +283,7 @@ public sealed class TransferRunner(AzCopyRunner azCopy)
                 {
                     ct.ThrowIfCancellationRequested();
                     var rel = Path.GetRelativePath(staging.Folder, file.Path).Replace('\\', '/');
-                    var target = TreeCopier.JoinRelative(dstTree, dst.SftpPath, rel);
+                    var target = TreeCopier.JoinRelative(dstTree, PathOf(dst), rel);
                     result.Total++;
                     processed.Add(rel);
                     await copier.CopyAndCountAsync(local, file, dstTree, target, uploadOptions, result, null, ct).ConfigureAwait(false);
@@ -253,7 +297,7 @@ public sealed class TransferRunner(AzCopyRunner azCopy)
                 if (DateTime.UtcNow - lastStatus > TimeSpan.FromSeconds(2) && result.Total > 0)
                 {
                     lastStatus = DateTime.UtcNow;
-                    output($"INFO: SFTP upload: {result.Done} done, {result.Skipped} skipped, {result.Failed} failed, {TreeCopier.FormatBytes(result.Bytes)}");
+                    output($"INFO: Upload to {dstTree.DisplayName}: {result.Done} done, {result.Skipped} skipped, {result.Failed} failed, {TreeCopier.FormatBytes(result.Bytes)}");
                 }
 
                 if (finished && ready.Count == 0) break;
@@ -262,12 +306,13 @@ public sealed class TransferRunner(AzCopyRunner azCopy)
 
             var code = await azTask.ConfigureAwait(false);
             if (code == 0 && o.SyncMode && o.DeleteDestination)
-                await copier.DeleteExtrasAsync(dstTree, dst.SftpPath, processed, false, result, ct).ConfigureAwait(false);
+                await copier.DeleteExtrasAsync(dstTree, PathOf(dst), processed, false, result, ct).ConfigureAwait(false);
             else if (code != 0 && o.DeleteDestination)
-                output("WARNING: azcopy failed, so no files were deleted at the SFTP destination.");
+                output("WARNING: azcopy failed, so no files were deleted at the destination.");
 
             new ProgressReporter(output, result, 0).Report(force: true);
-            output($"INFO: Uploaded {TreeCopier.FormatBytes(result.Bytes)} to SFTP; peak staging usage {TreeCopier.FormatBytes(staging.PeakBytes)}");
+            output($"INFO: Uploaded {TreeCopier.FormatBytes(result.Bytes)} to {dstTree.DisplayName}; peak staging usage {TreeCopier.FormatBytes(staging.PeakBytes)}");
+            ReportMetadata(dstTree, output);
             var status = Finish(result, output);
             return code != 0 ? code : status;
         }

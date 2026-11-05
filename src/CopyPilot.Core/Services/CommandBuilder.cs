@@ -80,9 +80,9 @@ public static class CommandBuilder
                     break;
                 }
 
-                if (target.Kind == LocationKind.Sftp)
+                if (target.IsCopyPilotHandled)
                 {
-                    plan.Errors.Add("SFTP is supported by 'Copy' and 'Sync' only.");
+                    plan.Errors.Add("SFTP and SharePoint are supported by 'Copy' and 'Sync' only.");
                     break;
                 }
 
@@ -129,10 +129,10 @@ public static class CommandBuilder
         plan.Errors.AddRange(src.Validate("Source"));
         plan.Errors.AddRange(dst.Validate("Destination"));
 
-        if (src.IsSftp || dst.IsSftp)
+        if (src.IsCopyPilotHandled || dst.IsCopyPilotHandled)
         {
-            // SFTP transfers are planned by TransferPlanner; azcopy never sees an SFTP location.
-            plan.Errors.Add("SFTP locations must be planned with TransferPlanner.");
+            // SFTP / SharePoint transfers are planned by TransferPlanner; azcopy never sees those locations.
+            plan.Errors.Add("SFTP and SharePoint locations must be planned with TransferPlanner.");
             return;
         }
 

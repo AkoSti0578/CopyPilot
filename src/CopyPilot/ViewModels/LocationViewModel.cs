@@ -10,6 +10,11 @@ public sealed record LocationKindItem(LocationKind Kind, string Title)
     public override string ToString() => Title;
 }
 
+public sealed record SharePointAuthItem(SharePointAuthMode Mode, string Title)
+{
+    public override string ToString() => Title;
+}
+
 /// <summary>Editor state for a source, destination or target location.</summary>
 public sealed class LocationViewModel : ObservableObject
 {
@@ -23,6 +28,7 @@ public sealed class LocationViewModel : ObservableObject
         BrowseFileCommand = new RelayCommand(BrowseFile);
         BrowseFolderCommand = new RelayCommand(BrowseFolder);
         BrowseKeyCommand = new RelayCommand(BrowseKey);
+        BrowseCertificateCommand = new RelayCommand(BrowseCertificate);
     }
 
     public string Header { get; }
@@ -37,6 +43,7 @@ public sealed class LocationViewModel : ObservableObject
         new(LocationKind.AmazonS3, "Amazon S3"),
         new(LocationKind.GoogleCloudStorage, "Google Cloud Storage"),
         new(LocationKind.Sftp, "SFTP server (SSH)"),
+        new(LocationKind.SharePoint, "SharePoint Online / OneDrive (Microsoft 365)"),
         new(LocationKind.CustomUrl, "Any URL (paste a full URL, e.g. with SAS)"),
         new(LocationKind.Pipe, "Pipe (stream from / to a file via stdin / stdout)"),
     ];
@@ -84,6 +91,37 @@ public sealed class LocationViewModel : ObservableObject
     public string PrivateKeyPassphrase { get => _spec.PrivateKeyPassphrase; set => Update(() => _spec.PrivateKeyPassphrase = value); }
     public string HostKeyFingerprint { get => _spec.HostKeyFingerprint; set => Update(() => _spec.HostKeyFingerprint = value); }
 
+    public string SiteUrl { get => _spec.SiteUrl; set => Update(() => _spec.SiteUrl = value); }
+    public string Library { get => _spec.Library; set => Update(() => _spec.Library = value); }
+    public string TenantId { get => _spec.TenantId; set => Update(() => _spec.TenantId = value); }
+    public string ClientId { get => _spec.ClientId; set => Update(() => _spec.ClientId = value); }
+    public string ClientSecret { get => _spec.ClientSecret; set => Update(() => _spec.ClientSecret = value); }
+    public string CertificatePath { get => _spec.CertificatePath; set => Update(() => _spec.CertificatePath = value); }
+    public string CertificatePassword { get => _spec.CertificatePassword; set => Update(() => _spec.CertificatePassword = value); }
+
+    public static IReadOnlyList<SharePointAuthItem> SharePointAuthModes { get; } =
+    [
+        new(SharePointAuthMode.Interactive, "Sign in as me (browser)"),
+        new(SharePointAuthMode.DeviceCode, "Sign in as me (device code)"),
+        new(SharePointAuthMode.ClientSecret, "App only – client secret (unattended)"),
+        new(SharePointAuthMode.Certificate, "App only – certificate (unattended)"),
+    ];
+
+    public SharePointAuthItem SelectedSharePointAuth
+    {
+        get => SharePointAuthModes.First(m => m.Mode == _spec.SharePointAuth);
+        set
+        {
+            if (value == null || value.Mode == _spec.SharePointAuth) return;
+            _spec.SharePointAuth = value.Mode;
+            OnPropertyChanged(string.Empty);
+            Changed?.Invoke(this, EventArgs.Empty);
+        }
+    }
+
+    public bool UsesClientSecret => IsSharePoint && _spec.SharePointAuth == SharePointAuthMode.ClientSecret;
+    public bool UsesCertificate => IsSharePoint && _spec.SharePointAuth == SharePointAuthMode.Certificate;
+
     /// <summary>Port as text so a half-typed value does not throw binding errors; invalid input becomes 0 (reported by validation).</summary>
     public string Port
     {
@@ -98,6 +136,7 @@ public sealed class LocationViewModel : ObservableObject
     public bool IsBucketBased => _spec.Kind is LocationKind.AmazonS3 or LocationKind.GoogleCloudStorage;
     public bool IsCustomUrl => _spec.Kind == LocationKind.CustomUrl;
     public bool IsSftp => _spec.Kind == LocationKind.Sftp;
+    public bool IsSharePoint => _spec.Kind == LocationKind.SharePoint;
     public bool HasContainer => IsAzure || IsBucketBased;
     public bool UsesLocalPath => IsLocal || IsPipe;
     public string LocalPathLabel => IsPipe ? (IsDestination ? "Save the stream to file" : "File to stream") : "Local path";
@@ -123,6 +162,13 @@ public sealed class LocationViewModel : ObservableObject
         LocationKind.Pipe => IsDestination
             ? "azcopy writes the downloaded blob to stdout; CopyPilot saves it to this file. Only works with an Azure Blob source."
             : "CopyPilot streams this file into azcopy's stdin. Only works with an Azure Blob destination.",
+        LocationKind.SharePoint =>
+            "CopyPilot transfers SharePoint files itself via Microsoft Graph (azcopy does not support SharePoint). Needs an app registration " +
+            "with the Microsoft Graph permission Sites.ReadWrite.All (delegated, for 'Sign in as me' – add redirect URI http://localhost under " +
+            "'Mobile and desktop applications') or Sites.Selected / Sites.ReadWrite.All (application, for app-only), with admin consent. " +
+            "File contents and last-modified times are copied. To also set the library's Created, Modified and authors, use " +
+            "'sharepoint-preserve-metadata' on the Options tab (needs the SharePoint permission AllSites.Write, or a certificate for app-only). " +
+            "Versions and permissions are not copied.",
         LocationKind.Sftp => IsDestination
             ? "CopyPilot uploads over SFTP. The path is a folder (created if needed); from a local or SFTP source a single file may also be given a new file name. From cloud storage, azcopy downloads into a small staging folder and each file is uploaded and permanently deleted right away."
             : "CopyPilot downloads over SFTP. Use a file, a folder (with --recursive) or a wildcard like /data/*.csv. To cloud storage, files pass through a small staging folder in batches (see sftp-staging-limit-mb) and are permanently deleted once uploaded.",
@@ -144,6 +190,7 @@ public sealed class LocationViewModel : ObservableObject
     public ICommand BrowseFileCommand { get; }
     public ICommand BrowseFolderCommand { get; }
     public ICommand BrowseKeyCommand { get; }
+    public ICommand BrowseCertificateCommand { get; }
 
     private void Update(Action apply)
     {
@@ -165,6 +212,13 @@ public sealed class LocationViewModel : ObservableObject
         var dlg = new OpenFileDialog { Title = Header, CheckFileExists = !IsDestination };
         if (dlg.ShowDialog() == true) LocalPath = dlg.FileName;
         OnPropertyChanged(nameof(LocalPath));
+    }
+
+    private void BrowseCertificate()
+    {
+        var dlg = new OpenFileDialog { Title = "Select certificate", Filter = "Certificates (*.pfx;*.p12)|*.pfx;*.p12|All files (*.*)|*.*" };
+        if (dlg.ShowDialog() == true) CertificatePath = dlg.FileName;
+        OnPropertyChanged(nameof(CertificatePath));
     }
 
     private void BrowseKey()

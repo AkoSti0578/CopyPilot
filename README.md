@@ -18,6 +18,7 @@ A recent AzCopy is bundled, so the MSI installs everything you need. No separate
   - Amazon S3
   - Google Cloud Storage
   - SFTP servers (SSH), see below
+  - SharePoint Online and OneDrive document libraries (Microsoft 365), see below
   - any URL you paste
   - pipes (stream a file through stdin/stdout)
 - **All options**: over 100 AzCopy flags, grouped by category, searchable and filtered to the selected command.
@@ -64,6 +65,81 @@ Pick **SFTP server (SSH)** as the source or destination of **Copy** or **Sync**:
 - **Sync limitation:** when syncing SFTP → cloud, `--delete-destination` is not available, because files are uploaded in batches.
 - Transfers that involve SFTP can't be exported as an AzCopy script. Save them as a profile instead.
 
+## SharePoint Online / OneDrive
+
+AzCopy has no SharePoint support either, so CopyPilot transfers SharePoint files itself via the
+[Microsoft Graph API](https://learn.microsoft.com/graph/api/resources/driveitem). Pick
+**SharePoint Online / OneDrive (Microsoft 365)** as the source or destination of **Copy** or **Sync**.
+The routes are the same as for SFTP:
+
+| Route | How it runs |
+| --- | --- |
+| Local, SFTP or SharePoint ↔ SharePoint | Directly by CopyPilot |
+| SharePoint → Azure | Batches through the small staging folder, uploaded by AzCopy |
+| Azure, S3 or Google Cloud → SharePoint | AzCopy downloads to staging; CopyPilot uploads each finished file and deletes it straight away |
+
+**Location fields**
+- **Site URL**, for example `https://contoso.sharepoint.com/sites/Team`. You can also paste the URL of a library
+  or a OneDrive (`https://contoso-my.sharepoint.com/personal/...`).
+- **Document library**, by display name or URL name. Empty means the site's default library.
+- **Folder**, with wildcards allowed. Leave it empty to copy the whole library: its contents go straight into the
+  destination. A named folder becomes a sub-folder of the destination, as in AzCopy; set `--as-subdir=false` to copy
+  only its contents.
+
+**One-time setup in Microsoft Entra ID.** Create an *app registration* and enter its Application (client) ID in CopyPilot.
+- **Sign in as me (browser or device code):** add the delegated Microsoft Graph permission `Sites.ReadWrite.All`.
+  For the browser sign-in, add redirect URI `http://localhost` under *Mobile and desktop applications*.
+  The sign-in is remembered, encrypted with DPAPI, in `%LOCALAPPDATA%\CopyPilot`.
+- **App only (unattended):** add the application permission `Sites.Selected`, then grant the app access per site.
+  `Sites.ReadWrite.All` also works. Use a certificate (preferred) or a client secret, and fill in the tenant.
+- An administrator usually has to grant consent.
+
+**Behaviour**
+- **Large files:** uploaded in 10 MiB chunks through resumable upload sessions.
+- **Throttling:** when SharePoint throttles (429/503), CopyPilot waits as instructed and retries.
+- **What is copied:** file contents and last-modified times. With **`sharepoint-preserve-metadata`** (Options tab) the library's
+  visible columns are set too (see below). Version history, permissions and extra columns are **not** copied.
+  For full-fidelity migrations use Microsoft's SharePoint Migration Tool.
+- **Sync** compares last-modified times only. SharePoint can change the size of Office files when it adds metadata,
+  so sizes are not reliable.
+- **Names SharePoint does not accept** are reported as errors, and the rest of the job continues:
+  - `" * : < > ? / \ |`
+  - `CON`, `.lock`, `~$…`, `_vti_`
+  - names starting or ending with a space
+  - paths over 400 characters
+- **Deleting with Sync:** `--delete-destination` moves files to the site's recycle bin.
+- **Limitations:** only the global Microsoft 365 cloud is supported (`graph.microsoft.com`).
+
+### Created, Modified and authors (`sharepoint-preserve-metadata`)
+
+By default the library shows the upload time in *Modified* and the uploading account in *Created By* / *Modified By*.
+Set **`sharepoint-preserve-metadata`** to change that:
+
+| Value | Sets |
+| --- | --- |
+| `none` (default) | nothing extra |
+| `dates` | **Created** and **Modified**, from the source (local files: creation time and last-modified time) |
+| `dates-and-authors` | also **Created By** and **Modified By**; the source must be SharePoint, normally in the same tenant |
+
+How it works:
+- CopyPilot calls SharePoint's `ValidateUpdateListItem` with `bNewDocumentUpdate=true` after each upload, so no extra
+  version is created.
+- SharePoint reads these dates in the **site's regional format and time zone**. CopyPilot reads the site's locale, lets
+  SharePoint itself convert UTC to site time (daylight-saving switches included), and reads the first items back to
+  verify. If the site does not understand its own short format, CopyPilot switches to ISO (`yyyy-MM-dd HH:mm:ss`)
+  automatically.
+- If an author no longer exists, the uploading account is kept for that field and the dates are still set. A warning
+  names the account.
+- If the columns cannot be set (for example because of a missing permission), the file is still copied. A warning and
+  a count at the end say so.
+
+Permissions:
+- **Sign in as me:** add the delegated **SharePoint** permission `AllSites.Write` to the app registration, next to the
+  Graph permission.
+- **App only:** use a **certificate**. SharePoint's REST API refuses app-only tokens obtained with a client secret, so
+  CopyPilot blocks that combination up front.
+  Remove, List and Make are not available for SharePoint.
+
 ## Install
 
 Download `CopyPilot-<version>-x64.msi` from the GitHub Actions artifacts or a release and run it.
@@ -91,6 +167,7 @@ once so that `build\azcopy\azcopy.exe` exists. You can also put `azcopy.exe` on 
 | --- | --- |
 | `src/CopyPilot.Core` | AzCopy command/option catalog, URL builder, command builder, output parser, runner, profiles (cross-platform, unit-tested) |
 | `src/CopyPilot` | WPF application (MVVM) |
+| `src/CopyPilot.Core/SharePoint` | SharePoint/OneDrive via Microsoft Graph: file tree, sign-in (MSAL), naming rules |
 | `src/CopyPilot.Core/Sftp` | SFTP engine: local/SFTP file trees, copy/sync engine, known-hosts store |
 | `tests/CopyPilot.Core.Tests` | xUnit tests (SFTP integration tests run when `COPYPILOT_SFTP_TEST=host:port:user:password[:keyfile:passphrase]` is set) |
 | `installer` | WiX v5 MSI project |
@@ -101,3 +178,4 @@ once so that `build\azcopy\azcopy.exe` exists. You can also put `azcopy.exe` on 
 - **CopyPilot**: © 2026 Arnold Kolkman.
 - **AzCopy**: © Microsoft Corporation, MIT License. https://github.com/Azure/azure-storage-azcopy
 - **SSH.NET** (SFTP): © the SSH.NET contributors, MIT License. https://github.com/sshnet/SSH.NET
+- **MSAL.NET** (Microsoft 365 sign-in): © Microsoft Corporation, MIT License. https://github.com/AzureAD/microsoft-authentication-library-for-dotnet

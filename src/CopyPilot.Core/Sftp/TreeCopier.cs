@@ -114,7 +114,8 @@ public sealed class TreeCopier(Action<string> output)
 
         output($"INFO: Scanning {src.DisplayName} {srcPath} …");
         await WalkAsync(src, srcPath, "", null, include, exclude, true, files, dirs, ct).ConfigureAwait(false);
-        var prefix = o.AsSubdir && !o.SyncMode ? stat.Name : "";
+        // --as-subdir keeps a named folder's name; the root of a library, share or home folder has none.
+        var prefix = o.AsSubdir && !o.SyncMode && !IsRootName(stat.Name) ? stat.Name : "";
         if (prefix.Length > 0)
         {
             files = files.Select(f => new SelectedFile(f.Entry, prefix + "/" + f.RelativePath)).ToList();
@@ -228,7 +229,7 @@ public sealed class TreeCopier(Action<string> output)
         var existing = await dst.StatAsync(target, ct).ConfigureAwait(false);
         if (existing?.IsDirectory == true)
             throw new IOException($"'{target}' is a directory at the destination.");
-        if (ShouldSkip(entry, existing, o)) return CopyOutcome.Skipped;
+        if (ShouldSkip(entry, existing, o, dst.HasExactSizes && src.HasExactSizes)) return CopyOutcome.Skipped;
 
         if (o.DryRun)
         {
@@ -244,11 +245,19 @@ public sealed class TreeCopier(Action<string> output)
         }
         else
         {
-            await using var stream = src.OpenRead(entry.Path);
-            await dst.WriteFromAsync(target, stream, bytesProgress, ct).ConfigureAwait(false);
+            await using var stream = await src.OpenReadAsync(entry.Path, ct).ConfigureAwait(false);
+            await dst.WriteFromAsync(target, stream, entry.Length, entry.LastWriteUtc, bytesProgress, ct).ConfigureAwait(false);
         }
 
-        await dst.SetLastWriteTimeUtcAsync(target, entry.LastWriteUtc, ct).ConfigureAwait(false);
+        if (!dst.SetsLastWriteTimeOnWrite)
+            await dst.SetLastWriteTimeUtcAsync(target, entry.LastWriteUtc, ct).ConfigureAwait(false);
+
+        if (dst.WantsSourceMetadata)
+        {
+            var metadata = await src.GetMetadataAsync(entry, ct).ConfigureAwait(false)
+                           ?? new FileMetadata(null, entry.LastWriteUtc, null, null);
+            await dst.ApplyMetadataAsync(target, entry, metadata, ct).ConfigureAwait(false);
+        }
         return CopyOutcome.Copied;
     }
 
@@ -281,11 +290,11 @@ public sealed class TreeCopier(Action<string> output)
         }
     }
 
-    private static bool ShouldSkip(FileEntry source, FileEntry? existing, TreeCopyOptions o)
+    private static bool ShouldSkip(FileEntry source, FileEntry? existing, TreeCopyOptions o, bool compareSizes)
     {
         if (existing == null) return false;
         if (o.SyncMode)
-            return existing.Length == source.Length && existing.LastWriteUtc >= source.LastWriteUtc - TimeTolerance;
+            return (!compareSizes || existing.Length == source.Length) && existing.LastWriteUtc >= source.LastWriteUtc - TimeTolerance;
         return o.Overwrite switch
         {
             OverwriteMode.Never => true,
@@ -314,6 +323,8 @@ public sealed class TreeCopier(Action<string> output)
             }
         }
     }
+
+    private static bool IsRootName(string name) => name.Trim('/', '\\') is "" or "." or "~";
 
     private static bool Matches(string name, List<Regex> include, List<Regex> exclude) =>
         (include.Count == 0 || include.Any(r => r.IsMatch(name))) && !exclude.Any(r => r.IsMatch(name));

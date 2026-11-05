@@ -5,25 +5,25 @@ using CopyPilot.Core.Sftp;
 
 namespace CopyPilot.Core.Services;
 
-/// <summary>How an SFTP transfer is carried out.</summary>
+/// <summary>How a transfer involving SFTP or SharePoint (which azcopy cannot reach) is carried out.</summary>
 public enum SftpRoute
 {
-    /// <summary>Local ↔ SFTP or SFTP ↔ SFTP, handled entirely by CopyPilot.</summary>
+    /// <summary>Between local disks, SFTP and SharePoint, handled entirely by CopyPilot.</summary>
     Direct,
 
-    /// <summary>SFTP → cloud: CopyPilot downloads to a staging folder, then azcopy uploads.</summary>
+    /// <summary>SFTP / SharePoint → cloud: CopyPilot downloads to a staging folder, then azcopy uploads.</summary>
     SftpToCloud,
 
-    /// <summary>Cloud → SFTP: azcopy downloads to a staging folder, then CopyPilot uploads.</summary>
+    /// <summary>Cloud → SFTP / SharePoint: azcopy downloads to a staging folder, then CopyPilot uploads.</summary>
     CloudToSftp,
 }
 
-/// <summary>What will be executed for a request: a plain azcopy command, or an SFTP transfer.</summary>
+/// <summary>What will be executed for a request: a plain azcopy command, or a CopyPilot (SFTP / SharePoint) transfer.</summary>
 public sealed class ExecutionPlan
 {
     public required CommandRequest Request { get; init; }
 
-    /// <summary>The azcopy command when no SFTP location is involved.</summary>
+    /// <summary>The azcopy command when no SFTP or SharePoint location is involved.</summary>
     public CommandPlan? AzCopy { get; init; }
 
     public SftpRoute? Route { get; init; }
@@ -34,9 +34,12 @@ public sealed class ExecutionPlan
     public long StagingLimitBytes { get; init; } = TransferPlanner.DefaultStagingLimitMb * 1024 * 1024;
     public TimeSpan SftpTimeout { get; init; } = TimeSpan.FromSeconds(30);
 
+    /// <summary>SharePoint list item fields (Created, Modified, authors) set on files uploaded to SharePoint.</summary>
+    public SharePointMetadataMode SharePointMetadata { get; init; } = SharePointMetadataMode.None;
+
     public List<string> Errors { get; } = [];
 
-    /// <summary>Options that are set but have no effect on the SFTP part of the transfer.</summary>
+    /// <summary>Options that are set but have no effect on the CopyPilot part of the transfer.</summary>
     public List<string> Warnings { get; } = [];
 
     public bool IsValid => Errors.Count == 0;
@@ -66,13 +69,13 @@ public sealed class ExecutionPlan
         switch (Route)
         {
             case SftpRoute.Direct:
-                sb.Append("# CopyPilot SFTP ").Append(Request.Command.Id).Append(": ")
+                sb.Append("# CopyPilot ").Append(Request.Command.Id).Append(": ")
                     .Append(Loc(src)).Append(" → ").Append(Loc(dst)).AppendLine();
                 sb.Append("#   ").Append(DescribeOptions());
                 break;
             case SftpRoute.SftpToCloud:
             {
-                sb.Append("# 1) CopyPilot SFTP download: ").Append(Loc(src)).Append(" → ").AppendLine(staging);
+                sb.Append("# 1) CopyPilot download: ").Append(Loc(src)).Append(" → ").AppendLine(staging);
                 var leg = TransferPlanner.BuildAzCopyLeg(this, new LocationSpec { Kind = LocationKind.Local, LocalPath = Path.Combine(staging, "<selection>") }, null);
                 sb.Append("# 2) per batch: ").AppendLine(mask ? leg.ToDisplayString(exe) : leg.ToUnmaskedString(exe));
                 sb.Append("# 3) permanently delete each batch from the staging folder (limit ").Append(StagingArea.Describe(StagingLimitBytes)).Append(')');
@@ -108,10 +111,10 @@ public sealed class ExecutionPlan
     }
 }
 
-/// <summary>Turns a request into an <see cref="ExecutionPlan"/>. SFTP transfers are split into CopyPilot and azcopy legs.</summary>
+/// <summary>Turns a request into an <see cref="ExecutionPlan"/>. SFTP / SharePoint transfers are split into CopyPilot and azcopy legs.</summary>
 public static class TransferPlanner
 {
-    /// <summary>azcopy options that CopyPilot's own SFTP engine understands.</summary>
+    /// <summary>azcopy options that CopyPilot's own transfer engine understands.</summary>
     private static readonly HashSet<string> TreeCopyOptionNames = new(StringComparer.OrdinalIgnoreCase)
     {
         "recursive", "as-subdir", "include-pattern", "exclude-pattern", "overwrite", "delete-destination", "dry-run",
@@ -128,9 +131,9 @@ public static class TransferPlanner
         var cmd = request.Command;
         var src = request.Source;
         var dst = request.Destination;
-        var sftpInvolved = cmd.Positionals == PositionalKind.SourceAndDestination
-                           && (src?.IsSftp == true || dst?.IsSftp == true);
-        if (!sftpInvolved)
+        var copyPilotInvolved = cmd.Positionals == PositionalKind.SourceAndDestination
+                                && (src?.IsCopyPilotHandled == true || dst?.IsCopyPilotHandled == true);
+        if (!copyPilotInvolved)
         {
             var azPlan = CommandBuilder.Build(request);
             var p = new ExecutionPlan { Request = request, AzCopy = azPlan };
@@ -143,13 +146,13 @@ public static class TransferPlanner
             .ToDictionary(kv => kv.Key, kv => kv.Value.Trim(), StringComparer.OrdinalIgnoreCase);
         var isSync = cmd.Id == CommandCatalog.Sync;
 
-        var route = (src!.Kind, dst!.Kind) switch
-        {
-            (LocationKind.Sftp, LocationKind.Sftp or LocationKind.Local) => SftpRoute.Direct,
-            (LocationKind.Local, LocationKind.Sftp) => SftpRoute.Direct,
-            (LocationKind.Sftp, _) => SftpRoute.SftpToCloud,
-            _ => SftpRoute.CloudToSftp,
-        };
+        // Positional kind is SourceAndDestination here, and one side is set; the UI always passes both.
+        src ??= new LocationSpec();
+        dst ??= new LocationSpec();
+        static bool Direct(LocationSpec l) => l.IsCopyPilotHandled || l.Kind == LocationKind.Local;
+        var route = Direct(src) && Direct(dst) ? SftpRoute.Direct
+            : src.IsCopyPilotHandled ? SftpRoute.SftpToCloud
+            : SftpRoute.CloudToSftp;
 
         var tree = new TreeCopyOptions
         {
@@ -177,31 +180,56 @@ public static class TransferPlanner
             StagingLimitBytes = (long)(ParseNumber(opts.GetValueOrDefault("sftp-staging-limit-mb")) is { } mb and >= 0 ? mb : DefaultStagingLimitMb) * 1024 * 1024,
             SftpTimeout = TimeSpan.FromSeconds(
                 double.TryParse(opts.GetValueOrDefault("sftp-timeout-seconds"), NumberStyles.Float, CultureInfo.InvariantCulture, out var t) && t > 0 ? t : 30),
+            SharePointMetadata = ParseMetadataMode(opts.GetValueOrDefault("sharepoint-preserve-metadata"), out var badMode),
         };
+
+        if (badMode != null) plan.Errors.Add($"sharepoint-preserve-metadata must be none, dates or dates-and-authors (not '{badMode}').");
+        if (plan.SharePointMetadata != SharePointMetadataMode.None)
+        {
+            if (!dst.IsSharePoint)
+            {
+                plan.Warnings.Add("sharepoint-preserve-metadata only applies when the destination is SharePoint.");
+            }
+            else
+            {
+                // SharePoint's REST API refuses app-only tokens obtained with a client secret.
+                if (dst.SharePointAuth == SharePointAuthMode.ClientSecret)
+                    plan.Errors.Add("Setting Created/Modified needs SharePoint's REST API, which does not accept app-only sign-in with a client secret. Use a certificate or sign in as a user.");
+                if (plan.SharePointMetadata == SharePointMetadataMode.DatesAndAuthors)
+                {
+                    if (!src.IsSharePoint)
+                        plan.Warnings.Add("Authors (Created By / Modified By) can only be carried over from a SharePoint source; only Created and Modified are set.");
+                    else if (src.SharePointAuth == SharePointAuthMode.ClientSecret)
+                        plan.Errors.Add("Reading authors from the source needs SharePoint's REST API, which does not accept app-only sign-in with a client secret. Use a certificate or sign in as a user.");
+                    else if (!string.Equals(SafeHost(src.SiteUrl), SafeHost(dst.SiteUrl), StringComparison.OrdinalIgnoreCase))
+                        plan.Warnings.Add("Source and destination are in different SharePoint tenants: authors only carry over if the same accounts exist in the destination tenant.");
+                }
+            }
+        }
 
         plan.Errors.AddRange(src.Validate("Source"));
         plan.Errors.AddRange(dst.Validate("Destination"));
         if (src.Kind == LocationKind.Pipe || dst.Kind == LocationKind.Pipe)
-            plan.Errors.Add("Pipes cannot be combined with SFTP.");
+            plan.Errors.Add("Pipes cannot be combined with SFTP or SharePoint.");
         if (opts.GetValueOrDefault("overwrite") is "prompt" || opts.GetValueOrDefault("delete-destination") is "prompt")
-            plan.Warnings.Add("'prompt' is not supported for SFTP and is treated as 'false'.");
+            plan.Warnings.Add("'prompt' is not supported for SFTP / SharePoint and is treated as 'false'.");
         if (opts.GetValueOrDefault("sftp-timeout-seconds") is { Length: > 0 } ts && ParseNumber(ts) == null)
             plan.Errors.Add("sftp-timeout-seconds must be a number.");
         if (opts.GetValueOrDefault("sftp-staging-limit-mb") is { Length: > 0 } lim && ParseNumber(lim) is null or < 0)
             plan.Errors.Add("sftp-staging-limit-mb must be 0 or a positive number.");
         if (route == SftpRoute.SftpToCloud && tree.DeleteDestination)
-            plan.Warnings.Add("--delete-destination is not supported when syncing from SFTP to cloud storage (files are uploaded in batches) and is ignored.");
+            plan.Warnings.Add("--delete-destination is not supported when syncing from SFTP / SharePoint to cloud storage (files are uploaded in batches) and is ignored.");
 
         if (route == SftpRoute.Direct)
         {
             foreach (var name in opts.Keys.Where(k => !TreeCopyOptionNames.Contains(k)
                                                         && OptionCatalog.Options.FirstOrDefault(d => d.Name.Equals(k, StringComparison.OrdinalIgnoreCase)) is { CopyPilotOnly: false }))
             {
-                plan.Warnings.Add($"--{name} has no effect on a direct SFTP transfer.");
+                plan.Warnings.Add($"--{name} has no effect on a transfer between local, SFTP and SharePoint locations.");
             }
 
             if (!string.IsNullOrWhiteSpace(request.ExtraArguments))
-                plan.Warnings.Add("Additional arguments are ignored for a direct SFTP transfer.");
+                plan.Warnings.Add("Additional arguments are ignored for a transfer between local, SFTP and SharePoint locations.");
         }
         else
         {
@@ -215,8 +243,8 @@ public static class TransferPlanner
     }
 
     /// <summary>
-    /// The azcopy part of a staged SFTP transfer. For SFTP → cloud the staged folder replaces the source and the user's
-    /// command runs unchanged; for cloud → SFTP azcopy copies (never syncs) into the staging folder, keeping last-modified times.
+    /// The azcopy part of a staged transfer. For SFTP / SharePoint → cloud the staged folder replaces the source and the user's
+    /// command runs unchanged; for cloud → SFTP / SharePoint azcopy copies (never syncs) into the staging folder, keeping last-modified times.
     /// </summary>
     public static CommandPlan BuildAzCopyLeg(ExecutionPlan plan, LocationSpec? stagedSource, LocationSpec? stagingDestination)
     {
@@ -256,6 +284,22 @@ public static class TransferPlanner
             ExtraArguments = request.ExtraArguments,
         });
     }
+
+    private static SharePointMetadataMode ParseMetadataMode(string? value, out string? invalid)
+    {
+        invalid = null;
+        switch (value?.Trim().ToLowerInvariant())
+        {
+            case null or "" or "none": return SharePointMetadataMode.None;
+            case "dates": return SharePointMetadataMode.Dates;
+            case "dates-and-authors": return SharePointMetadataMode.DatesAndAuthors;
+            default:
+                invalid = value;
+                return SharePointMetadataMode.None;
+        }
+    }
+
+    private static string? SafeHost(string url) => Uri.TryCreate(url.Trim(), UriKind.Absolute, out var u) ? u.Host : null;
 
     private static double? ParseNumber(string? s) =>
         double.TryParse(s, NumberStyles.Float, CultureInfo.InvariantCulture, out var d) ? d : null;
